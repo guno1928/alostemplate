@@ -97,14 +97,13 @@ func BenchmarkHybrid_ReplaceEndToEnd(b *testing.B) {
 			e := newTestEngine(b)
 			tpl := mustCompile(b, e, buildSource(16, ll, "k"))
 			pairs := buildPairs(16, "k", 24)
-			dst := Replace(tpl, nil, pairs)
+			dst := Replace(tpl, pairs)
 			b.ReportAllocs()
 			b.SetBytes(int64(len(dst)))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				dst = Replace(tpl, dst, pairs)
+				sinkString = Replace(tpl, pairs)
 			}
-			sinkBytes = dst
 		})
 	}
 }

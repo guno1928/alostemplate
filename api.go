@@ -134,7 +134,8 @@ func SetRenderCacheTTL(ttl time.Duration) { defaultEngine.SetRenderCacheTTL(ttl)
 // Engine. Zero means the cache is disabled.
 func RenderCacheTTL() time.Duration { return defaultEngine.RenderCacheTTL() }
 
-// Replace renders tpl into dst using one of the supported replacement formats.
+// Replace renders tpl using one of the supported replacement formats and
+// returns the finished page.
 //
 // The values argument may be a string, a []string of flat key/value pairs, or
 // a map[string]string. A single string is shorthand for templates with one
@@ -142,26 +143,26 @@ func RenderCacheTTL() time.Duration { return defaultEngine.RenderCacheTTL() }
 // number of items. Missing keys are left in the output as their original
 // placeholder text, which makes unresolved placeholders visible.
 //
-// Pass nil for dst in the normal case. Replace returns an error if tpl is nil
-// or if values has an unsupported type.
-func Replace(tpl *Template, dst []byte, values any) ([]byte, error) {
+// Results are served from the render cache, so repeated calls with equal values
+// cost a single lookup. Replace returns an error if tpl is nil or if values has
+// an unsupported type.
+func Replace(tpl *Template, values any) (string, error) {
 	if tpl == nil {
-		return nil, fmt.Errorf("template is nil")
+		return "", fmt.Errorf("template is nil")
 	}
 	switch typed := values.(type) {
+	case nil:
+		return corepkg.ReplaceMap(tpl, nil), nil
 	case string:
-		return corepkg.Replace(tpl, dst, []string{typed}), nil
+		return corepkg.Replace(tpl, []string{typed}), nil
 	case []string:
-		if len(typed) == 0 {
-			return corepkg.Replace(tpl, dst, nil), nil
-		}
 		if len(typed) > 1 && len(typed)%2 != 0 {
-			return nil, fmt.Errorf("replacement pairs must have an even number of items or a single value shorthand")
+			return "", fmt.Errorf("replacement pairs must have an even number of items or a single value shorthand")
 		}
-		return corepkg.Replace(tpl, dst, typed), nil
+		return corepkg.Replace(tpl, typed), nil
 	case map[string]string:
-		return corepkg.ReplaceMap(tpl, dst, typed), nil
+		return corepkg.ReplaceMap(tpl, typed), nil
 	default:
-		return nil, fmt.Errorf("unsupported replacement input %T: use string, []string, or map[string]string", values)
+		return "", fmt.Errorf("unsupported replacement input %T: use string, []string, or map[string]string", values)
 	}
 }

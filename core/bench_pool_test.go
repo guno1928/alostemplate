@@ -30,7 +30,7 @@ func BenchmarkPoolSteadyState(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = Replace(tpl, dst, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
 	benchSink = dst
 }
@@ -49,7 +49,7 @@ func BenchmarkPoolAfterGC(b *testing.B) {
 		runtime.GC()
 		runtime.GC()
 		b.StartTimer()
-		dst = Replace(tpl, dst, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
 	benchSink = dst
 }
@@ -64,7 +64,7 @@ func BenchmarkPoolFirstTouchPerP(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		dst := make([]byte, 0, 1<<16)
 		for pb.Next() {
-			dst = Replace(tpl, dst, pairs)
+			sinkString = Replace(tpl, pairs)
 		}
 		benchSink = dst
 	})

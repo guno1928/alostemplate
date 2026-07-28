@@ -50,7 +50,7 @@ func TestWithDelimitersOption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out, err := Replace(tpl, nil, "V")
+	out, err := Replace(tpl, "V")
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestWithAutoRefreshOption(t *testing.T) {
 	// pre-existing data race in the in-place reload path.
 	time.Sleep(300 * time.Millisecond)
 	e.Stop()
-	out, err := Replace(tpl, nil, []string{"v", "x"})
+	out, err := Replace(tpl, []string{"v", "x"})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestWithModifiedOnlyOption(t *testing.T) {
 	if err := e.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	out, err := Replace(tpl, nil, []string{"v", "x"})
+	out, err := Replace(tpl, []string{"v", "x"})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestPackageLoadAndReplace(t *testing.T) {
 	if tpl.Name() != "greet" {
 		t.Fatalf("Name = %q", tpl.Name())
 	}
-	out, err := Replace(tpl, nil, "Ada")
+	out, err := Replace(tpl, "Ada")
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestPackageLoadDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out, err := Replace(tpl, nil, map[string]string{"title": "T", "brand": "B"})
+	out, err := Replace(tpl, map[string]string{"title": "T", "brand": "B"})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestPackageReload(t *testing.T) {
 	if err := Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	out, err := Replace(tpl, nil, []string{"v", "x"})
+	out, err := Replace(tpl, []string{"v", "x"})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestPackageSetDelimitersAndDelimiters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out, err := Replace(tpl, nil, "V")
+	out, err := Replace(tpl, "V")
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestPackageSetAutoRefresh(t *testing.T) {
 }
 
 func TestReplaceNilTemplateErrors(t *testing.T) {
-	if _, err := Replace(nil, nil, "x"); err == nil {
+	if _, err := Replace(nil, "x"); err == nil {
 		t.Fatal("expected error for nil template")
 	} else if !strings.Contains(err.Error(), "template is nil") {
 		t.Fatalf("error = %v", err)
@@ -231,8 +231,8 @@ func TestReplaceUnsupportedType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	for _, bad := range []any{nil, 42, 3.5, true, []int{1}, map[string]int{"a": 1}, struct{}{}} {
-		if _, err := Replace(tpl, nil, bad); err == nil {
+	for _, bad := range []any{42, 3.5, true, []int{1}, map[string]int{"a": 1}, struct{}{}} {
+		if _, err := Replace(tpl, bad); err == nil {
 			t.Fatalf("expected error for %T", bad)
 		} else if !strings.Contains(err.Error(), "unsupported replacement input") {
 			t.Fatalf("error for %T = %v", bad, err)
@@ -247,14 +247,14 @@ func TestReplaceStringShorthand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out, err := Replace(tpl, nil, "there")
+	out, err := Replace(tpl, "there")
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 	if string(out) != "Hi there." {
 		t.Fatalf("render = %q", out)
 	}
-	out, err = Replace(tpl, nil, "")
+	out, err = Replace(tpl, "")
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestReplaceStringSlice(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	out, err := Replace(tpl, nil, []string{"a", "1", "b", "2"})
+	out, err := Replace(tpl, []string{"a", "1", "b", "2"})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestReplaceStringSlice(t *testing.T) {
 		t.Fatalf("render = %q", out)
 	}
 
-	out, err = Replace(tpl, nil, []string{})
+	out, err = Replace(tpl, []string{})
 	if err != nil {
 		t.Fatalf("Replace empty slice: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestReplaceStringSlice(t *testing.T) {
 		t.Fatalf("empty slice render = %q", out)
 	}
 
-	out, err = Replace(tpl, nil, []string(nil))
+	out, err = Replace(tpl, []string(nil))
 	if err != nil {
 		t.Fatalf("Replace nil slice: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestReplaceSingleElementSliceShorthand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out, err := Replace(tpl, nil, []string{"V"})
+	out, err := Replace(tpl, []string{"V"})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestReplaceOddPairsError(t *testing.T) {
 		{"a", "1", "b"},
 		{"a", "1", "b", "2", "c"},
 	} {
-		if _, err := Replace(tpl, nil, bad); err == nil {
+		if _, err := Replace(tpl, bad); err == nil {
 			t.Fatalf("expected error for %v", bad)
 		} else if !strings.Contains(err.Error(), "even number") {
 			t.Fatalf("error = %v", err)
@@ -338,14 +338,14 @@ func TestReplaceMapInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out, err := Replace(tpl, nil, map[string]string{"a": "1", "c": "3"})
+	out, err := Replace(tpl, map[string]string{"a": "1", "c": "3"})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 	if string(out) != "1/{{b}}/3" {
 		t.Fatalf("render = %q", out)
 	}
-	out, err = Replace(tpl, nil, map[string]string(nil))
+	out, err = Replace(tpl, map[string]string(nil))
 	if err != nil {
 		t.Fatalf("Replace nil map: %v", err)
 	}
@@ -361,9 +361,9 @@ func TestReplaceReusesDst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	dst := make([]byte, 0, 256)
+	var dst string
 	for i := 0; i < 5; i++ {
-		dst, err = Replace(tpl, dst, []string{"x", "V"})
+		dst, err = Replace(tpl, []string{"x", "V"})
 		if err != nil {
 			t.Fatalf("Replace: %v", err)
 		}

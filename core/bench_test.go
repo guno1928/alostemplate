@@ -37,7 +37,7 @@ func BenchmarkReplacePairsCold(b *testing.B) {
 		b.Run(benchName(slots), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				benchSink = Replace(tpl, nil, pairs)
+				sinkString = Replace(tpl, pairs)
 			}
 		})
 	}
@@ -54,7 +54,7 @@ func BenchmarkReplacePairsWarm(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				dst = Replace(tpl, dst, pairs)
+				sinkString = Replace(tpl, pairs)
 			}
 			benchSink = dst
 		})
@@ -70,7 +70,7 @@ func BenchmarkReplaceMapCold(b *testing.B) {
 		b.Run(benchName(slots), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				benchSink = ReplaceMap(tpl, nil, values)
+				sinkString = ReplaceMap(tpl, values)
 			}
 		})
 	}
@@ -87,7 +87,7 @@ func BenchmarkReplaceMapWarm(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				dst = ReplaceMap(tpl, dst, values)
+				sinkString = ReplaceMap(tpl, values)
 			}
 			benchSink = dst
 		})
@@ -106,7 +106,7 @@ func BenchmarkReplaceSingleShorthand(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = Replace(tpl, dst, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
 	benchSink = dst
 }
@@ -123,7 +123,7 @@ func BenchmarkReplaceSingleKeyed(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = Replace(tpl, dst, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
 	benchSink = dst
 }
@@ -140,7 +140,7 @@ func BenchmarkReplaceSingleMap(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = ReplaceMap(tpl, dst, values)
+		sinkString = ReplaceMap(tpl, values)
 	}
 	benchSink = dst
 }
@@ -155,7 +155,7 @@ func BenchmarkReplaceMissingKeys(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				dst = Replace(tpl, dst, nil)
+				sinkString = Replace(tpl, nil)
 			}
 			benchSink = dst
 		})
@@ -181,7 +181,7 @@ func BenchmarkReplacePartialKeys(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				dst = ReplaceMap(tpl, dst, partial)
+				sinkString = ReplaceMap(tpl, partial)
 			}
 			benchSink = dst
 		})
@@ -204,7 +204,7 @@ func BenchmarkReplaceDuplicateKeys(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = Replace(tpl, dst, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
 	benchSink = dst
 }
@@ -226,7 +226,7 @@ func BenchmarkReplaceLargeValues(b *testing.B) {
 	b.SetBytes(int64(len(body)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = Replace(tpl, dst, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
 	benchSink = dst
 }
@@ -299,7 +299,7 @@ func BenchmarkReplaceRealisticHTMLPairs(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = Replace(tpl, dst, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
 	benchSink = dst
 }
@@ -316,7 +316,7 @@ func BenchmarkReplaceRealisticHTMLMap(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = ReplaceMap(tpl, dst, values)
+		sinkString = ReplaceMap(tpl, values)
 	}
 	benchSink = dst
 }
@@ -334,7 +334,7 @@ func BenchmarkReplaceParallelPairs(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		dst := make([]byte, 0, 4096)
 		for pb.Next() {
-			dst = Replace(tpl, dst, pairs)
+			sinkString = Replace(tpl, pairs)
 		}
 		benchSink = dst
 	})
@@ -353,7 +353,7 @@ func BenchmarkReplaceParallelMap(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		dst := make([]byte, 0, 4096)
 		for pb.Next() {
-			dst = ReplaceMap(tpl, dst, values)
+			sinkString = ReplaceMap(tpl, values)
 		}
 		benchSink = dst
 	})
@@ -369,7 +369,7 @@ func BenchmarkReplaceParallelLargeSlots(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		dst := make([]byte, 0, 1<<16)
 		for pb.Next() {
-			dst = Replace(tpl, dst, pairs)
+			sinkString = Replace(tpl, pairs)
 		}
 		benchSink = dst
 	})

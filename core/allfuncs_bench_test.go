@@ -355,48 +355,46 @@ func BenchmarkFn_renderTarget(b *testing.B) {
 
 func BenchmarkFn_Replace_FreshBuffer(b *testing.B) {
 	_, tpl, pairs, _ := bmEngineTemplate(b)
-	warm := Replace(tpl, nil, pairs)
+	warm := Replace(tpl, pairs)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(warm)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sinkBytes = Replace(tpl, nil, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
 }
 
 func BenchmarkFn_Replace_ReusedBuffer(b *testing.B) {
 	_, tpl, pairs, _ := bmEngineTemplate(b)
-	dst := Replace(tpl, nil, pairs)
+	dst := Replace(tpl, pairs)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(dst)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = Replace(tpl, dst, pairs)
+		sinkString = Replace(tpl, pairs)
 	}
-	sinkBytes = dst
 }
 
 func BenchmarkFn_ReplaceMap_FreshBuffer(b *testing.B) {
 	_, tpl, _, values := bmEngineTemplate(b)
-	warm := ReplaceMap(tpl, nil, values)
+	warm := ReplaceMap(tpl, values)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(warm)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sinkBytes = ReplaceMap(tpl, nil, values)
+		sinkString = ReplaceMap(tpl, values)
 	}
 }
 
 func BenchmarkFn_ReplaceMap_ReusedBuffer(b *testing.B) {
 	_, tpl, _, values := bmEngineTemplate(b)
-	dst := ReplaceMap(tpl, nil, values)
+	dst := ReplaceMap(tpl, values)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(dst)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst = ReplaceMap(tpl, dst, values)
+		sinkString = ReplaceMap(tpl, values)
 	}
-	sinkBytes = dst
 }
 
 func BenchmarkFn_renderStatic_FreshBuffer(b *testing.B) {

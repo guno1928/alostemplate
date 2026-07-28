@@ -43,7 +43,7 @@ func benchSinglePage(b *testing.B, totalBytes int, valueLen int) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			dst = Replace(tpl, dst, pairs)
+			sinkString = Replace(tpl, pairs)
 		}
 		benchSink = dst
 	})
@@ -54,7 +54,7 @@ func benchSinglePage(b *testing.B, totalBytes int, valueLen int) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			dst = Replace(tpl, dst, pairs)
+			sinkString = Replace(tpl, pairs)
 		}
 		benchSink = dst
 	})
@@ -65,7 +65,7 @@ func benchSinglePage(b *testing.B, totalBytes int, valueLen int) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			dst = ReplaceMap(tpl, dst, values)
+			sinkString = ReplaceMap(tpl, values)
 		}
 		benchSink = dst
 	})
@@ -75,7 +75,7 @@ func benchSinglePage(b *testing.B, totalBytes int, valueLen int) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			benchSink = Replace(tpl, nil, pairs)
+			sinkString = Replace(tpl, pairs)
 		}
 	})
 }
@@ -105,7 +105,7 @@ func BenchmarkSinglePageParallel(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {
 				dst := make([]byte, 0, out+64)
 				for pb.Next() {
-					dst = Replace(tpl, dst, pairs)
+					sinkString = Replace(tpl, pairs)
 				}
 				benchSink = dst
 			})
@@ -122,13 +122,13 @@ func TestSingleSlotPageRendersCorrectly(t *testing.T) {
 			t.Fatalf("size=%d did not take the single-slot path", size)
 		}
 		want := strings.Replace(src, "{{content}}", value, 1)
-		if got := string(Replace(tpl, nil, []string{value})); got != want {
+		if got := Replace(tpl, []string{value}); got != want {
 			t.Fatalf("size=%d shorthand render mismatch", size)
 		}
-		if got := string(Replace(tpl, nil, []string{"content", value})); got != want {
+		if got := Replace(tpl, []string{"content", value}); got != want {
 			t.Fatalf("size=%d keyed render mismatch", size)
 		}
-		if got := string(ReplaceMap(tpl, nil, map[string]string{"content": value})); got != want {
+		if got := ReplaceMap(tpl, map[string]string{"content": value}); got != want {
 			t.Fatalf("size=%d map render mismatch", size)
 		}
 	}

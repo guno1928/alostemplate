@@ -103,7 +103,7 @@ func TestAutoRefreshLoopReloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := string(Replace(tpl, nil, []string{"name", "x"})); got != "hello x" {
+	if got := Replace(tpl, []string{"name", "x"}); got != "hello x" {
 		t.Fatalf("initial render = %q", got)
 	}
 	time.Sleep(30 * time.Millisecond)
@@ -113,7 +113,7 @@ func TestAutoRefreshLoopReloads(t *testing.T) {
 	// TestAutoRefreshConcurrentRenderIsRacy for that known defect.
 	time.Sleep(300 * time.Millisecond)
 	e.Stop()
-	if got := string(Replace(tpl, nil, []string{"name", "x"})); got != "bye x" {
+	if got := Replace(tpl, []string{"name", "x"}); got != "bye x" {
 		t.Fatalf("auto refresh never picked up change, got %q", got)
 	}
 }
@@ -145,9 +145,8 @@ func TestAutoRefreshConcurrentRenderIsRacy(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}()
-	var dst []byte
 	for i := 0; i < 20000; i++ {
-		dst = Replace(tpl, dst, []string{"v", "x"})
+		sinkString = Replace(tpl, []string{"v", "x"})
 	}
 	<-done
 }
@@ -245,7 +244,7 @@ func TestEngineLoadFile(t *testing.T) {
 	if tpl.FileName() != "greet.alos" {
 		t.Fatalf("FileName = %q", tpl.FileName())
 	}
-	if got := string(Replace(tpl, nil, []string{"name", "Ada"})); got != "Hello Ada!" {
+	if got := Replace(tpl, []string{"name", "Ada"}); got != "Hello Ada!" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -312,7 +311,7 @@ func TestEngineLoadRecompilesWhenSignatureChanges(t *testing.T) {
 	if first == second {
 		t.Fatal("expected recompile after change")
 	}
-	if got := string(Replace(second, nil, []string{"a", "1"})); got != "changed 1" {
+	if got := Replace(second, []string{"a", "1"}); got != "changed 1" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -349,13 +348,13 @@ func TestEngineLoadDirectory(t *testing.T) {
 	if bundle.Name() != "index" {
 		t.Fatalf("default target = %q want index", bundle.Name())
 	}
-	if got := string(Replace(bundle, nil, []string{"title", "T"})); got != "INDEX T" {
+	if got := Replace(bundle, []string{"title", "T"}); got != "INDEX T" {
 		t.Fatalf("bundle render = %q", got)
 	}
-	if got := string(Replace(bundle.Named("sub/page"), nil, []string{"body", "B"})); got != "PAGE B" {
+	if got := Replace(bundle.Named("sub/page"), []string{"body", "B"}); got != "PAGE B" {
 		t.Fatalf("named render = %q", got)
 	}
-	if got := string(Replace(bundle.Named("page"), nil, []string{"body", "B"})); got != "PAGE B" {
+	if got := Replace(bundle.Named("page"), []string{"body", "B"}); got != "PAGE B" {
 		t.Fatalf("base alias render = %q", got)
 	}
 }
@@ -372,7 +371,7 @@ func TestEngineLoadDirectoryDefaultsToFirstSortedWhenNoIndex(t *testing.T) {
 	if bundle.Name() != "alpha" {
 		t.Fatalf("default = %q want alpha", bundle.Name())
 	}
-	if got := string(Replace(bundle, nil, nil)); got != "A" {
+	if got := Replace(bundle, nil); got != "A" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -427,7 +426,7 @@ func TestEngineLoadDirectoryIncludeExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	got := string(Replace(bundle, nil, []string{"brand", "ALOS", "body", "hi"}))
+	got := Replace(bundle, []string{"brand", "ALOS", "body", "hi"})
 	want := "<html><nav>ALOS</nav><body>hi</body></html>"
 	if got != want {
 		t.Fatalf("render = %q want %q", got, want)
@@ -443,7 +442,7 @@ func TestEngineLoadDirectoryIncludeSingleQuotes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := string(Replace(bundle, nil, nil)); got != "A-P-B" {
+	if got := Replace(bundle, nil); got != "A-P-B" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -456,7 +455,7 @@ func TestEngineLoadDirectoryIncludeUnknownStaysLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := string(Replace(bundle, nil, nil)); got != "A{{include \"missing\"}}B" {
+	if got := Replace(bundle, nil); got != "A{{include \"missing\"}}B" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -502,7 +501,7 @@ func TestEngineLoadDirectoryCustomDelimiters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := string(Replace(bundle, nil, []string{"name", "n"})); got != "NAV|n" {
+	if got := Replace(bundle, []string{"name", "n"}); got != "NAV|n" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -555,7 +554,7 @@ func TestEngineReloadUpdatesInPlace(t *testing.T) {
 	if err := e.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got := string(Replace(tpl, nil, []string{"v", "x"})); got != "two x" {
+	if got := Replace(tpl, []string{"v", "x"}); got != "two x" {
 		t.Fatalf("render after reload = %q", got)
 	}
 }
@@ -625,7 +624,7 @@ func TestEngineReloadModifiedOnlyPicksUpChanges(t *testing.T) {
 	if err := e.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got := string(Replace(tpl, nil, []string{"v", "x"})); got != "two x" {
+	if got := Replace(tpl, []string{"v", "x"}); got != "two x" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -665,7 +664,7 @@ func TestTemplateReloadFile(t *testing.T) {
 	if err := tpl.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got := string(Replace(tpl, nil, []string{"v", "x"})); got != "two x" {
+	if got := Replace(tpl, []string{"v", "x"}); got != "two x" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -704,10 +703,10 @@ func TestTemplateReloadNamedChildKeepsHandleValid(t *testing.T) {
 	if err := nav.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got := string(Replace(nav, nil, []string{"v", "x"})); got != "NAV2 x" {
+	if got := Replace(nav, []string{"v", "x"}); got != "NAV2 x" {
 		t.Fatalf("named handle render = %q", got)
 	}
-	if got := string(Replace(bundle.Named("nav"), nil, []string{"v", "x"})); got != "NAV2 x" {
+	if got := Replace(bundle.Named("nav"), []string{"v", "x"}); got != "NAV2 x" {
 		t.Fatalf("bundle lookup render = %q", got)
 	}
 }
@@ -728,10 +727,10 @@ func TestTemplateReloadBundleKeepsChildHandles(t *testing.T) {
 	if err := bundle.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got := string(Replace(bundle, nil, []string{"v", "x"})); got != "I2x" {
+	if got := Replace(bundle, []string{"v", "x"}); got != "I2x" {
 		t.Fatalf("bundle render = %q", got)
 	}
-	if got := string(Replace(nav, nil, nil)); got != "N2" {
+	if got := Replace(nav, nil); got != "N2" {
 		t.Fatalf("old child handle render = %q want N2", got)
 	}
 }
@@ -1026,7 +1025,7 @@ func TestCompileSourceEmpty(t *testing.T) {
 	if tpl.staticLen != 0 {
 		t.Fatalf("staticLen = %d", tpl.staticLen)
 	}
-	if got := string(Replace(tpl, nil, nil)); got != "" {
+	if got := Replace(tpl, nil); got != "" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -1128,7 +1127,7 @@ func TestCompileSourceCustomDelimiters(t *testing.T) {
 	if tpl.keys[0] != "k" {
 		t.Fatalf("key = %q", tpl.keys[0])
 	}
-	if got := string(Replace(tpl, nil, []string{"k", "V"})); got != "aVb{{notakey}}" {
+	if got := Replace(tpl, []string{"k", "V"}); got != "aVb{{notakey}}" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -1142,7 +1141,7 @@ func TestCompileSourceAdjacentSlots(t *testing.T) {
 	if tpl.staticLen != 0 {
 		t.Fatalf("staticLen = %d want 0", tpl.staticLen)
 	}
-	if got := string(Replace(tpl, nil, []string{"a", "1", "b", "2"})); got != "12" {
+	if got := Replace(tpl, []string{"a", "1", "b", "2"}); got != "12" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -1171,17 +1170,16 @@ func TestCompileNamedTemplate(t *testing.T) {
 }
 
 func TestReplaceNilTemplate(t *testing.T) {
-	if got := Replace(nil, nil, []string{"a", "b"}); len(got) != 0 {
+	if got := Replace(nil, []string{"a", "b"}); len(got) != 0 {
 		t.Fatalf("Replace(nil) = %q", got)
 	}
-	dst := make([]byte, 5)
-	if got := Replace(nil, dst, nil); len(got) != 0 {
-		t.Fatalf("Replace(nil) with dst = %q", got)
+	if got := Replace(nil, nil); len(got) != 0 {
+		t.Fatalf("Replace(nil) with no values = %q", got)
 	}
 }
 
 func TestReplaceMapNilTemplate(t *testing.T) {
-	if got := ReplaceMap(nil, nil, map[string]string{"a": "b"}); len(got) != 0 {
+	if got := ReplaceMap(nil, map[string]string{"a": "b"}); len(got) != 0 {
 		t.Fatalf("ReplaceMap(nil) = %q", got)
 	}
 }
@@ -1189,18 +1187,16 @@ func TestReplaceMapNilTemplate(t *testing.T) {
 func TestReplaceStatic(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "static only")
-	if got := string(Replace(tpl, nil, []string{"a", "b"})); got != "static only" {
+	if got := Replace(tpl, []string{"a", "b"}); got != "static only" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(ReplaceMap(tpl, nil, map[string]string{"a": "b"})); got != "static only" {
+	if got := ReplaceMap(tpl, map[string]string{"a": "b"}); got != "static only" {
 		t.Fatalf("map render = %q", got)
 	}
-	big := make([]byte, 0, 1024)
-	if got := string(Replace(tpl, big, nil)); got != "static only" {
+	if got := Replace(tpl, nil); got != "static only" {
 		t.Fatalf("warm dst render = %q", got)
 	}
-	small := make([]byte, 2)
-	if got := string(Replace(tpl, small, nil)); got != "static only" {
+	if got := Replace(tpl, nil); got != "static only" {
 		t.Fatalf("cold dst render = %q", got)
 	}
 }
@@ -1208,10 +1204,10 @@ func TestReplaceStatic(t *testing.T) {
 func TestReplaceSingleShorthand(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "Hello {{name}}!")
-	if got := string(Replace(tpl, nil, []string{"World"})); got != "Hello World!" {
+	if got := Replace(tpl, []string{"World"}); got != "Hello World!" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(Replace(tpl, nil, []string{""})); got != "Hello !" {
+	if got := Replace(tpl, []string{""}); got != "Hello !" {
 		t.Fatalf("empty value render = %q", got)
 	}
 }
@@ -1219,7 +1215,7 @@ func TestReplaceSingleShorthand(t *testing.T) {
 func TestReplaceSingleMatchingPair(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "Hello {{name}}!")
-	if got := string(Replace(tpl, nil, []string{"name", "Ada"})); got != "Hello Ada!" {
+	if got := Replace(tpl, []string{"name", "Ada"}); got != "Hello Ada!" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -1227,7 +1223,7 @@ func TestReplaceSingleMatchingPair(t *testing.T) {
 func TestReplaceSingleNonMatchingPairKeepsPlaceholder(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "Hello {{name}}!")
-	if got := string(Replace(tpl, nil, []string{"other", "Ada"})); got != "Hello {{name}}!" {
+	if got := Replace(tpl, []string{"other", "Ada"}); got != "Hello {{name}}!" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -1235,7 +1231,7 @@ func TestReplaceSingleNonMatchingPairKeepsPlaceholder(t *testing.T) {
 func TestReplaceSingleNilPairsKeepsPlaceholder(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "Hello {{name}}!")
-	if got := string(Replace(tpl, nil, nil)); got != "Hello {{name}}!" {
+	if got := Replace(tpl, nil); got != "Hello {{name}}!" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -1243,10 +1239,10 @@ func TestReplaceSingleNilPairsKeepsPlaceholder(t *testing.T) {
 func TestReplaceSingleManyPairs(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "Hello {{name}}!")
-	if got := string(Replace(tpl, nil, []string{"a", "1", "name", "Ada", "b", "2"})); got != "Hello Ada!" {
+	if got := Replace(tpl, []string{"a", "1", "name", "Ada", "b", "2"}); got != "Hello Ada!" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(Replace(tpl, nil, []string{"a", "1", "b", "2", "c", "3"})); got != "Hello {{name}}!" {
+	if got := Replace(tpl, []string{"a", "1", "b", "2", "c", "3"}); got != "Hello {{name}}!" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -1254,16 +1250,16 @@ func TestReplaceSingleManyPairs(t *testing.T) {
 func TestReplaceSingleNoPrefixOrSuffix(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "{{only}}")
-	if got := string(Replace(tpl, nil, []string{"V"})); got != "V" {
+	if got := Replace(tpl, []string{"V"}); got != "V" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(Replace(tpl, nil, []string{"only", "V"})); got != "V" {
+	if got := Replace(tpl, []string{"only", "V"}); got != "V" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(ReplaceMap(tpl, nil, map[string]string{"only": "V"})); got != "V" {
+	if got := ReplaceMap(tpl, map[string]string{"only": "V"}); got != "V" {
 		t.Fatalf("map render = %q", got)
 	}
-	if got := string(Replace(tpl, nil, []string{""})); got != "" {
+	if got := Replace(tpl, []string{""}); got != "" {
 		t.Fatalf("empty render = %q", got)
 	}
 }
@@ -1271,16 +1267,16 @@ func TestReplaceSingleNoPrefixOrSuffix(t *testing.T) {
 func TestReplaceSingleMap(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "Hello {{name}}!")
-	if got := string(ReplaceMap(tpl, nil, map[string]string{"name": "Ada"})); got != "Hello Ada!" {
+	if got := ReplaceMap(tpl, map[string]string{"name": "Ada"}); got != "Hello Ada!" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(ReplaceMap(tpl, nil, map[string]string{"other": "x"})); got != "Hello {{name}}!" {
+	if got := ReplaceMap(tpl, map[string]string{"other": "x"}); got != "Hello {{name}}!" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(ReplaceMap(tpl, nil, nil)); got != "Hello {{name}}!" {
+	if got := ReplaceMap(tpl, nil); got != "Hello {{name}}!" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(ReplaceMap(tpl, nil, map[string]string{"name": ""})); got != "Hello !" {
+	if got := ReplaceMap(tpl, map[string]string{"name": ""}); got != "Hello !" {
 		t.Fatalf("render = %q", got)
 	}
 }
@@ -1289,12 +1285,12 @@ func TestReplaceMissingKeysKeepPlaceholders(t *testing.T) {
 	e := newTestEngine(t)
 	src := "a{{k1}}b{{k2}}c{{k3}}d"
 	tpl := mustCompile(t, e, src)
-	got := string(Replace(tpl, nil, []string{"k2", "V"}))
+	got := Replace(tpl, []string{"k2", "V"})
 	want := "a{{k1}}bVc{{k3}}d"
 	if got != want {
 		t.Fatalf("render = %q want %q", got, want)
 	}
-	gotMap := string(ReplaceMap(tpl, nil, map[string]string{"k2": "V"}))
+	gotMap := ReplaceMap(tpl, map[string]string{"k2": "V"})
 	if gotMap != want {
 		t.Fatalf("map render = %q want %q", gotMap, want)
 	}
@@ -1303,13 +1299,13 @@ func TestReplaceMissingKeysKeepPlaceholders(t *testing.T) {
 func TestReplaceDuplicateKeys(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "{{a}}|{{a}}|{{b}}|{{a}}")
-	if got := string(Replace(tpl, nil, []string{"a", "X", "b", "Y"})); got != "X|X|Y|X" {
+	if got := Replace(tpl, []string{"a", "X", "b", "Y"}); got != "X|X|Y|X" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(ReplaceMap(tpl, nil, map[string]string{"a": "X", "b": "Y"})); got != "X|X|Y|X" {
+	if got := ReplaceMap(tpl, map[string]string{"a": "X", "b": "Y"}); got != "X|X|Y|X" {
 		t.Fatalf("map render = %q", got)
 	}
-	if got := string(ReplaceMap(tpl, nil, map[string]string{"b": "Y"})); got != "{{a}}|{{a}}|Y|{{a}}" {
+	if got := ReplaceMap(tpl, map[string]string{"b": "Y"}); got != "{{a}}|{{a}}|Y|{{a}}" {
 		t.Fatalf("map partial render = %q", got)
 	}
 }
@@ -1322,10 +1318,10 @@ func TestReplaceAcrossAllSlotCounts(t *testing.T) {
 		values := buildValues(slots, "k", 5)
 		pairs := buildPairs(slots, "k", 5)
 		want := expectedRender(src, values)
-		if got := string(Replace(tpl, nil, pairs)); got != want {
+		if got := Replace(tpl, pairs); got != want {
 			t.Fatalf("slots=%d pairs render mismatch", slots)
 		}
-		if got := string(ReplaceMap(tpl, nil, values)); got != want {
+		if got := ReplaceMap(tpl, values); got != want {
 			t.Fatalf("slots=%d map render mismatch", slots)
 		}
 		partial := make(map[string]string, slots)
@@ -1337,23 +1333,21 @@ func TestReplaceAcrossAllSlotCounts(t *testing.T) {
 			}
 		}
 		wantPartial := expectedRender(src, partial)
-		if got := string(ReplaceMap(tpl, nil, partial)); got != wantPartial {
+		if got := ReplaceMap(tpl, partial); got != wantPartial {
 			t.Fatalf("slots=%d partial map render mismatch", slots)
 		}
-		if got := string(Replace(tpl, nil, partialPairs)); got != wantPartial {
+		if got := Replace(tpl, partialPairs); got != wantPartial {
 			t.Fatalf("slots=%d partial pairs render mismatch", slots)
 		}
 	}
 }
 
-func TestReplaceDstReuseWarm(t *testing.T) {
+func TestReplaceRepeatedRendersAreStable(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "a{{x}}b{{y}}c")
-	dst := make([]byte, 0, 512)
 	for i := 0; i < 8; i++ {
-		dst = Replace(tpl, dst, []string{"x", "1", "y", "2"})
-		if string(dst) != "a1b2c" {
-			t.Fatalf("iteration %d render = %q", i, dst)
+		if got := Replace(tpl, []string{"x", "1", "y", "2"}); got != "a1b2c" {
+			t.Fatalf("iteration %d render = %q", i, got)
 		}
 	}
 }
@@ -1361,9 +1355,8 @@ func TestReplaceDstReuseWarm(t *testing.T) {
 func TestReplaceDstReuseGrowsWhenTooSmall(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "a{{x}}b")
-	dst := make([]byte, 1)
 	long := strings.Repeat("Z", 4096)
-	out := Replace(tpl, dst, []string{"x", long})
+	out := Replace(tpl, []string{"x", long})
 	if string(out) != "a"+long+"b" {
 		t.Fatal("grown render incorrect")
 	}
@@ -1375,8 +1368,7 @@ func TestReplaceDstReuseGrowsWhenTooSmall(t *testing.T) {
 func TestReplaceDstReuseShrinks(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "a{{x}}b")
-	dst := make([]byte, 4096)
-	out := Replace(tpl, dst, []string{"x", "1"})
+	out := Replace(tpl, []string{"x", "1"})
 	if string(out) != "a1b" {
 		t.Fatalf("render = %q", out)
 	}
@@ -1389,7 +1381,7 @@ func TestReplaceDoesNotAliasInput(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "a{{x}}b")
 	value := []byte("VALUE")
-	out := Replace(tpl, nil, []string{"x", string(value)})
+	out := Replace(tpl, []string{"x", string(value)})
 	value[0] = 'Z'
 	if string(out) != "aVALUEb" {
 		t.Fatalf("output aliased caller memory: %q", out)
@@ -1403,7 +1395,7 @@ func TestReplaceMapSmallBoundary(t *testing.T) {
 		tpl := mustCompile(t, e, src)
 		values := buildValues(slots, "k", 4)
 		want := expectedRender(src, values)
-		if got := string(ReplaceMap(tpl, nil, values)); got != want {
+		if got := ReplaceMap(tpl, values); got != want {
 			t.Fatalf("slots=%d render = %q want %q", slots, got, want)
 		}
 	}
@@ -1412,11 +1404,11 @@ func TestReplaceMapSmallBoundary(t *testing.T) {
 func TestReplaceMapSmallDirect(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "a{{x}}b{{y}}c")
-	got := string(ReplaceMap(tpl, nil, map[string]string{"x": "1", "y": "2"}))
+	got := ReplaceMap(tpl, map[string]string{"x": "1", "y": "2"})
 	if got != "a1b2c" {
 		t.Fatalf("render = %q", got)
 	}
-	got = string(ReplaceMap(tpl, make([]byte, 64), map[string]string{"x": "1"}))
+	got = ReplaceMap(tpl, map[string]string{"x": "1"})
 	if got != "a1b{{y}}c" {
 		t.Fatalf("partial render = %q", got)
 	}
@@ -1452,7 +1444,7 @@ func TestReplaceLargeValues(t *testing.T) {
 	tpl := mustCompile(t, e, "<{{a}}|{{b}}>")
 	a := strings.Repeat("A", 100000)
 	b := strings.Repeat("B", 100000)
-	got := string(Replace(tpl, nil, []string{"a", a, "b", b}))
+	got := Replace(tpl, []string{"a", a, "b", b})
 	if got != "<"+a+"|"+b+">" {
 		t.Fatal("large value render mismatch")
 	}
@@ -1461,10 +1453,10 @@ func TestReplaceLargeValues(t *testing.T) {
 func TestReplaceUnicode(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "héllo {{名前}} 🎉")
-	if got := string(Replace(tpl, nil, []string{"名前", "世界"})); got != "héllo 世界 🎉" {
+	if got := Replace(tpl, []string{"名前", "世界"}); got != "héllo 世界 🎉" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(ReplaceMap(tpl, nil, map[string]string{"名前": "世界"})); got != "héllo 世界 🎉" {
+	if got := ReplaceMap(tpl, map[string]string{"名前": "世界"}); got != "héllo 世界 🎉" {
 		t.Fatalf("map render = %q", got)
 	}
 }
@@ -1478,10 +1470,10 @@ func TestReplaceBundleUsesDefaultTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := string(Replace(bundle, nil, []string{"v", "x"})); got != "Ix" {
+	if got := Replace(bundle, []string{"v", "x"}); got != "Ix" {
 		t.Fatalf("render = %q", got)
 	}
-	if got := string(ReplaceMap(bundle, nil, map[string]string{"v": "x"})); got != "Ix" {
+	if got := ReplaceMap(bundle, map[string]string{"v": "x"}); got != "Ix" {
 		t.Fatalf("map render = %q", got)
 	}
 }
@@ -1746,15 +1738,15 @@ func TestRenderScratchDoesNotLeakStaleValues(t *testing.T) {
 	src := buildSource(16, 2, "k")
 	tpl := mustCompile(t, e, src)
 	full := buildPairs(16, "k", 3)
-	if got := string(Replace(tpl, nil, full)); got != expectedRender(src, buildValues(16, "k", 3)) {
+	if got := Replace(tpl, full); got != expectedRender(src, buildValues(16, "k", 3)) {
 		t.Fatal("full render mismatch")
 	}
 	empty := map[string]string{}
 	want := expectedRender(src, empty)
-	if got := string(Replace(tpl, nil, nil)); got != want {
+	if got := Replace(tpl, nil); got != want {
 		t.Fatalf("stale scratch leaked into render:\n got %q\nwant %q", got, want)
 	}
-	if got := string(ReplaceMap(tpl, nil, empty)); got != want {
+	if got := ReplaceMap(tpl, empty); got != want {
 		t.Fatalf("stale scratch leaked into map render:\n got %q\nwant %q", got, want)
 	}
 }
@@ -1790,15 +1782,12 @@ func TestConcurrentReplaceIsSafe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var dst []byte
 			for j := 0; j < 200; j++ {
-				dst = Replace(tpl, dst, pairs)
-				if string(dst) != want {
+				if got := Replace(tpl, pairs); got != want {
 					t.Errorf("concurrent pairs render mismatch")
 					return
 				}
-				dst = ReplaceMap(tpl, dst, values)
-				if string(dst) != want {
+				if got := ReplaceMap(tpl, values); got != want {
 					t.Errorf("concurrent map render mismatch")
 					return
 				}

@@ -144,7 +144,7 @@ func BenchmarkAPI_Stop(b *testing.B) {
 
 func BenchmarkAPI_Replace_Pairs_FreshBuffer(b *testing.B) {
 	tpl, pairs, _ := apiTemplate(b)
-	warm, err := Replace(tpl, nil, pairs)
+	warm, err := Replace(tpl, pairs)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -152,13 +152,13 @@ func BenchmarkAPI_Replace_Pairs_FreshBuffer(b *testing.B) {
 	b.SetBytes(int64(len(warm)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		apiSinkBytes, apiSinkErr = Replace(tpl, nil, pairs)
+		apiSinkString, apiSinkErr = Replace(tpl, pairs)
 	}
 }
 
 func BenchmarkAPI_Replace_Pairs_ReusedBuffer(b *testing.B) {
 	tpl, pairs, _ := apiTemplate(b)
-	dst, err := Replace(tpl, nil, pairs)
+	dst, err := Replace(tpl, pairs)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -166,14 +166,14 @@ func BenchmarkAPI_Replace_Pairs_ReusedBuffer(b *testing.B) {
 	b.SetBytes(int64(len(dst)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst, apiSinkErr = Replace(tpl, dst, pairs)
+		dst, apiSinkErr = Replace(tpl, pairs)
 	}
-	apiSinkBytes = dst
+	apiSinkString = dst
 }
 
 func BenchmarkAPI_Replace_Map_FreshBuffer(b *testing.B) {
 	tpl, _, values := apiTemplate(b)
-	warm, err := Replace(tpl, nil, values)
+	warm, err := Replace(tpl, values)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -181,13 +181,13 @@ func BenchmarkAPI_Replace_Map_FreshBuffer(b *testing.B) {
 	b.SetBytes(int64(len(warm)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		apiSinkBytes, apiSinkErr = Replace(tpl, nil, values)
+		apiSinkString, apiSinkErr = Replace(tpl, values)
 	}
 }
 
 func BenchmarkAPI_Replace_Map_ReusedBuffer(b *testing.B) {
 	tpl, _, values := apiTemplate(b)
-	dst, err := Replace(tpl, nil, values)
+	dst, err := Replace(tpl, values)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -195,9 +195,9 @@ func BenchmarkAPI_Replace_Map_ReusedBuffer(b *testing.B) {
 	b.SetBytes(int64(len(dst)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst, apiSinkErr = Replace(tpl, dst, values)
+		dst, apiSinkErr = Replace(tpl, values)
 	}
-	apiSinkBytes = dst
+	apiSinkString = dst
 }
 
 func BenchmarkAPI_Replace_StringShorthand(b *testing.B) {
@@ -210,7 +210,7 @@ func BenchmarkAPI_Replace_StringShorthand(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	dst, err := Replace(tpl, nil, "value")
+	dst, err := Replace(tpl, "value")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func BenchmarkAPI_Replace_StringShorthand(b *testing.B) {
 	b.SetBytes(int64(len(dst)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dst, apiSinkErr = Replace(tpl, dst, "value")
+		dst, apiSinkErr = Replace(tpl, "value")
 	}
-	apiSinkBytes = dst
+	apiSinkString = dst
 }

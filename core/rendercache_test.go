@@ -19,8 +19,8 @@ func TestCachedReplaceMapKeyedByValues(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := cacheTestTemplate(t, e, 4)
 
-	a := string(ReplaceMap(tpl, nil, map[string]string{"k0": "AAA", "k1": "BBB", "k2": "C", "k3": "D"}))
-	b := string(ReplaceMap(tpl, nil, map[string]string{"k0": "ZZZ", "k1": "YYY", "k2": "X", "k3": "W"}))
+	a := ReplaceMap(tpl, map[string]string{"k0": "AAA", "k1": "BBB", "k2": "C", "k3": "D"})
+	b := ReplaceMap(tpl, map[string]string{"k0": "ZZZ", "k1": "YYY", "k2": "X", "k3": "W"})
 
 	if a == b {
 		t.Fatal("different values produced identical output")
@@ -42,38 +42,21 @@ func TestCachedAndUncachedRendersAgree(t *testing.T) {
 		tplUncached := mustCompile(t, uncached, src)
 		for _, count := range []int{0, 1, slots} {
 			values := buildValues(count, "k", 12)
-			want := string(ReplaceMap(tplUncached, nil, values))
+			want := ReplaceMap(tplUncached, values)
 			for i := 0; i < 3; i++ {
-				if got := string(ReplaceMap(tplCached, nil, values)); got != want {
+				if got := ReplaceMap(tplCached, values); got != want {
 					t.Fatalf("slots=%d count=%d call=%d: cached differs from uncached", slots, count, i)
 				}
 			}
 
 			pairs := buildPairs(count, "k", 12)
-			wantPairs := string(Replace(tplUncached, nil, pairs))
+			wantPairs := Replace(tplUncached, pairs)
 			for i := 0; i < 3; i++ {
-				if got := string(Replace(tplCached, nil, pairs)); got != wantPairs {
+				if got := Replace(tplCached, pairs); got != wantPairs {
 					t.Fatalf("slots=%d count=%d call=%d: cached pairs differ", slots, count, i)
 				}
 			}
 		}
-	}
-}
-
-func TestCachedReplaceHonoursCallerBuffer(t *testing.T) {
-	e := newTestEngine(t)
-	tpl := cacheTestTemplate(t, e, 4)
-	values := buildValues(4, "k", 12)
-
-	want := string(ReplaceMap(tpl, nil, values))
-
-	dst := make([]byte, 0, 8192)
-	got := ReplaceMap(tpl, dst, values)
-	if string(got) != want {
-		t.Fatal("render into caller buffer differs from cached render")
-	}
-	if cap(got) != cap(dst) || &got[:1][0] != &dst[:1][0] {
-		t.Fatal("a caller-supplied buffer must be written into, not replaced by a cached one")
 	}
 }
 
@@ -83,9 +66,9 @@ func TestCachedRenderNoCollisionAcrossManyValueSets(t *testing.T) {
 	seen := make(map[string]string, 2000)
 	for i := 0; i < 2000; i++ {
 		id := "id-" + strconv.Itoa(i)
-		out := string(ReplaceMap(tpl, nil, map[string]string{
+		out := ReplaceMap(tpl, map[string]string{
 			"k0": id, "k1": strconv.Itoa(i), "k2": "x", "k3": "y",
-		}))
+		})
 		if !strings.Contains(out, id) {
 			t.Fatalf("render for %s does not contain its own value", id)
 		}
@@ -122,7 +105,7 @@ func TestRenderCacheClearedOnReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	values := map[string]string{"k0": "v"}
-	if first := string(ReplaceMap(tpl, nil, values)); !strings.Contains(first, "VERSION-ONE") {
+	if first := ReplaceMap(tpl, values); !strings.Contains(first, "VERSION-ONE") {
 		t.Fatalf("unexpected first render: %q", first)
 	}
 
@@ -135,7 +118,7 @@ func TestRenderCacheClearedOnReload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if second := string(ReplaceMap(tpl, nil, values)); !strings.Contains(second, "VERSION-TWO") {
+	if second := ReplaceMap(tpl, values); !strings.Contains(second, "VERSION-TWO") {
 		t.Fatalf("reload did not invalidate the render cache: got %q", second)
 	}
 }
@@ -144,9 +127,9 @@ func TestClearRenderCacheForcesRerender(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := cacheTestTemplate(t, e, 4)
 	values := buildValues(4, "k", 12)
-	want := string(ReplaceMap(tpl, nil, values))
+	want := ReplaceMap(tpl, values)
 	tpl.ClearRenderCache()
-	if got := string(ReplaceMap(tpl, nil, values)); got != want {
+	if got := ReplaceMap(tpl, values); got != want {
 		t.Fatal("render after ClearRenderCache differs")
 	}
 }
@@ -162,9 +145,9 @@ func TestCachedRenderConcurrentCorrectness(t *testing.T) {
 			defer wg.Done()
 			id := "worker-" + strconv.Itoa(w)
 			for i := 0; i < 200; i++ {
-				out := string(ReplaceMap(tpl, nil, map[string]string{
+				out := ReplaceMap(tpl, map[string]string{
 					"k0": id, "k1": "b", "k2": "c", "k3": "d",
-				}))
+				})
 				if !strings.Contains(out, id) {
 					errs <- "worker " + id + " saw another worker's render"
 					return
@@ -181,10 +164,10 @@ func TestCachedRenderConcurrentCorrectness(t *testing.T) {
 
 func TestCachedRenderNilTemplate(t *testing.T) {
 	var tpl *Template
-	if got := ReplaceMap(tpl, nil, nil); len(got) != 0 {
+	if got := ReplaceMap(tpl, nil); len(got) != 0 {
 		t.Fatalf("nil template should render empty, got %q", got)
 	}
-	if got := Replace(tpl, nil, nil); len(got) != 0 {
+	if got := Replace(tpl, nil); len(got) != 0 {
 		t.Fatalf("nil template should render empty, got %q", got)
 	}
 	tpl.ClearRenderCache()
@@ -194,12 +177,12 @@ func BenchmarkCachedReplaceMap_Hit(b *testing.B) {
 	e := newTestEngine(b)
 	tpl := mustCompile(b, e, buildSource(16, 512, "k"))
 	values := buildValues(16, "k", 24)
-	warm := ReplaceMap(tpl, nil, values)
+	warm := ReplaceMap(tpl, values)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(warm)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sinkBytes = ReplaceMap(tpl, nil, values)
+		sinkString = ReplaceMap(tpl, values)
 	}
 }
 
@@ -207,12 +190,12 @@ func BenchmarkCachedReplaceMap_Disabled(b *testing.B) {
 	e := newTestEngine(b, WithRenderCache(RenderCacheDisabled))
 	tpl := mustCompile(b, e, buildSource(16, 512, "k"))
 	values := buildValues(16, "k", 24)
-	warm := ReplaceMap(tpl, nil, values)
+	warm := ReplaceMap(tpl, values)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(warm)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sinkBytes = ReplaceMap(tpl, nil, values)
+		sinkString = ReplaceMap(tpl, values)
 	}
 }
 
@@ -220,13 +203,13 @@ func BenchmarkCachedReplaceMap_HitParallel(b *testing.B) {
 	e := newTestEngine(b)
 	tpl := mustCompile(b, e, buildSource(16, 512, "k"))
 	values := buildValues(16, "k", 24)
-	warm := ReplaceMap(tpl, nil, values)
+	warm := ReplaceMap(tpl, values)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(warm)))
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			sinkBytes = ReplaceMap(tpl, nil, values)
+			sinkString = ReplaceMap(tpl, values)
 		}
 	})
 }

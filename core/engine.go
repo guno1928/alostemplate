@@ -222,7 +222,7 @@ type Template struct {
 	table       keyTable
 	staticLen   int
 	single      singleSlot
-	renderCache *alosmap.TypedMap[uint64, *[]byte]
+	renderCache *alosmap.TypedMap[uint64, *string]
 }
 
 func hashRenderValues(values map[string]string) uint64 {
@@ -507,7 +507,7 @@ func applyTemplateReload(dst *Template, src *Template) {
 				child = dst.named[normalizeTemplateName(srcChild.fileName)]
 			}
 			if child == nil {
-				child = &Template{renderCache: alosmap.NewTyped[uint64, *[]byte]()}
+				child = &Template{renderCache: alosmap.NewTyped[uint64, *string]()}
 			}
 			applyTemplateReload(child, srcChild)
 			childMap[srcChild] = child
@@ -686,7 +686,7 @@ func (e *Engine) loadDirectory(abs string, force bool) (*Template, error) {
 		}
 	}
 	bundle := &Template{
-		renderCache: alosmap.NewTyped[uint64, *[]byte](),
+		renderCache: alosmap.NewTyped[uint64, *string](),
 		engine:      e,
 		sourcePath:  abs,
 		loadPath:    abs,
@@ -918,48 +918,50 @@ func renderPairsInto(tpl *Template, dst []byte, pairs []string) []byte {
 	return dst
 }
 
-func ReplaceMap(tpl *Template, dst []byte, values map[string]string) []byte {
+func ReplaceMap(tpl *Template, values map[string]string) string {
 	if tpl == nil {
-		return dst[:0]
+		return ""
 	}
 	tpl = tpl.renderTarget()
-	store, ttl := tpl.renderCacheFor(dst)
+	store, ttl := tpl.renderCacheFor()
 	if store == nil {
-		return renderMapInto(tpl, dst, values)
+		return bytesToString(renderMapInto(tpl, nil, values))
 	}
 	key := hashRenderValues(values)
 	if hit, ok := store.Load(key); ok && hit != nil {
 		return *hit
 	}
-	out := renderMapInto(tpl, nil, values)
-	stored := out
-	store.StoreWithTTL(key, &stored, ttl)
-	return out
+	rendered := bytesToString(renderMapInto(tpl, nil, values))
+	store.StoreWithTTL(key, &rendered, ttl)
+	return rendered
 }
 
-func Replace(tpl *Template, dst []byte, pairs []string) []byte {
+func Replace(tpl *Template, pairs []string) string {
 	if tpl == nil {
-		return dst[:0]
+		return ""
 	}
 	tpl = tpl.renderTarget()
-	store, ttl := tpl.renderCacheFor(dst)
+	store, ttl := tpl.renderCacheFor()
 	if store == nil {
-		return renderPairsInto(tpl, dst, pairs)
+		return bytesToString(renderPairsInto(tpl, nil, pairs))
 	}
 	key := hashRenderPairs(pairs)
 	if hit, ok := store.Load(key); ok && hit != nil {
 		return *hit
 	}
-	out := renderPairsInto(tpl, nil, pairs)
-	stored := out
-	store.StoreWithTTL(key, &stored, ttl)
-	return out
+	rendered := bytesToString(renderPairsInto(tpl, nil, pairs))
+	store.StoreWithTTL(key, &rendered, ttl)
+	return rendered
 }
 
-func (tpl *Template) renderCacheFor(dst []byte) (*alosmap.TypedMap[uint64, *[]byte], time.Duration) {
-	if dst != nil {
-		return nil, 0
+func bytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
 	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
+
+func (tpl *Template) renderCacheFor() (*alosmap.TypedMap[uint64, *string], time.Duration) {
 	store := tpl.renderCache
 	if store == nil {
 		return nil, 0
@@ -1152,7 +1154,7 @@ func (e *Engine) compileSource(src string) (*Template, error) {
 	}
 
 	tpl := &Template{
-		renderCache: alosmap.NewTyped[uint64, *[]byte](),
+		renderCache: alosmap.NewTyped[uint64, *string](),
 		engine:      e,
 		literals:    literals,
 		keys:        keys,
