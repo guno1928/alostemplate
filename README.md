@@ -8,7 +8,7 @@ Features:
 - **Explicit includes** — `{{include "nav"}}` pulls one file into another at load time
 - **Auto-refresh** — set an interval and templates reload from disk automatically
 - **Render cache, on by default** — repeat renders of the same template and values are served from a 4-second cache in ~17 ns with zero allocations
-- **Zero-allocation rendering** on every path — the cache allocates nothing on a hit, and supplying your own `dst` allocates nothing on a miss
+- **Returns a `string`** — immutable, so cached pages are shared safely with no copy and no read-only caveats
 - **[alosmap](https://github.com/guno1928/alosmap)** typed maps for concurrent file and render caching
 
 ## Install
@@ -30,13 +30,13 @@ tpl, err := alos.Load("page.alos")
 if err != nil {
     panic(err)
 }
-out, err := alos.Replace(tpl, nil, map[string]string{
+out, err := alos.Replace(tpl, map[string]string{
     "title": "Hello World",
 })
 if err != nil {
     panic(err)
 }
-fmt.Println(string(out))
+fmt.Println(out)
 ```
 
 ## Public API
@@ -47,7 +47,7 @@ fmt.Println(string(out))
 |---|---|
 | `Load(path)` | Load a single `.alos` file or a directory bundle |
 | `Reload()` | Force re-read all loaded templates from disk |
-| `Replace(tpl, dst, values)` | Render a template with placeholder values |
+| `Replace(tpl, values)` | Render a template with placeholder values |
 | `SetDelimiters(left, right)` | Change delimiters for future loads |
 | `SetAutoRefresh(interval)` | Enable/disable periodic auto-reload (0 = off) |
 | `SetRenderCacheTTL(ttl)` | Change how long rendered output is cached |
@@ -92,13 +92,12 @@ fmt.Println(string(out))
 
 ### Replace Inputs
 
-`Replace(tpl, dst, values)` accepts three value types:
+`Replace(tpl, values)` returns the finished page as a `string` and accepts four value types:
 
+- **`nil`** — render with no substitutions
 - **`string`** — single-value shorthand (fills the first placeholder)
 - **`[]string`** — flat `"key","value","key","value"` pairs
 - **`map[string]string`** — key→value map (recommended)
-
-Pass `nil` for `dst` unless you manage your own output buffer.
 
 ## Includes
 
@@ -138,37 +137,28 @@ Template names inside a bundle are the relative path with the `.alos` extension 
 
 ## How Replace Works
 
-`Replace` takes a compiled template and a set of values. It resolves each placeholder key, then concatenates literals and values into the output buffer.
+`Replace` takes a compiled template and a set of values. It resolves each placeholder key, then concatenates literals and values into the finished page.
 
 - If a placeholder key is found in the values, the value is substituted.
 - If a placeholder key is **not** found, the original placeholder text (e.g. `{{title}}`) is left in the output unchanged. This makes missing keys visible during development.
 
-### The `dst` argument decides who owns the output
+### Rendering is cached and returns a string
 
-`Replace` has two modes, and neither allocates in steady state:
+`Replace` returns a `string`, and results are served from the render cache:
 
-| Call | Behaviour | Cost (75 KB page) |
+| | Cost (75 KB page) | Allocations |
 |---|---|---|
-| `Replace(tpl, nil, values)` | Served from the render cache. The returned slice is **owned by the engine** | ~17 ns, 0 allocs |
-| `Replace(tpl, dst, values)` | Rendered into **your** buffer, cache untouched | ~1090 ns, 0 allocs |
+| Cache hit | **~17 ns** | **0** |
+| Cache miss (renders, then caches) | ~1500 ns | 1 |
 
 ```go
-// Cached. Fastest. Do not write into the result.
-out, err := alos.Replace(tpl, nil, values)
-w.Write(out)
-
-// Your buffer. Use when you need to own or mutate the bytes.
-var buf []byte
-for _, item := range items {
-    buf, err = alos.Replace(tpl, buf, item.Value)
-    w.Write(buf)
-}
+out, err := alos.Replace(tpl, values)
+io.WriteString(w, out)
 ```
 
-> **The slice returned when `dst` is `nil` must be treated as read-only.**
-> It is shared with every other caller rendering the same template and values.
-> Writing into it corrupts their output. If you need a mutable buffer, pass your
-> own `dst`, or copy the result.
+Because the result is a `string`, it is immutable. The engine can hand the same
+page to every caller with equal values at no cost, and there is nothing a caller
+can do to corrupt it. You never manage an output buffer.
 
 ### Fast paths
 
@@ -180,12 +170,12 @@ for _, item := range items {
 
 ## Render Cache
 
-Every template carries its own render cache, keyed on a hash of the values you pass. It is **enabled by default with a 4-second TTL**, and it only applies when `dst` is `nil`.
+Every template carries its own render cache, keyed on a hash of the values you pass. It is **enabled by default with a 4-second TTL**.
 
 ```go
 // Default: cached for 4 seconds
 tpl, _ := alos.Load("page.alos")
-out, _ := alos.Replace(tpl, nil, values)   // ~17 ns on a hit, 0 allocations
+out, _ := alos.Replace(tpl, values)   // ~17 ns on a hit, 0 allocations
 
 // Longer TTL for pages that rarely change
 e := alos.New(alos.WithRenderCache(30 * time.Second))
@@ -202,7 +192,7 @@ What you should know before relying on it:
 - **The cache is lazy, not refreshed in the background.** After the TTL expires, the next caller to arrive pays the full render cost synchronously. There is no background goroutine.
 - **Output can be up to the TTL stale.** If the values behind a page change, callers keep seeing the previous render until the entry expires.
 - **`Reload()` invalidates it.** Reloading a template clears its cached renders, so on-disk edits are never masked by the cache.
-- **Memory is bounded only by the TTL.** Each distinct set of values holds one rendered page until it expires. A page rendered with a high-cardinality value (a user ID, a session token) will store one entry per distinct value. Disable the cache or pass your own `dst` for those.
+- **Memory is bounded only by the TTL.** Each distinct set of values holds one rendered page until it expires. A page rendered with a high-cardinality value (a user ID, a session token) will store one entry per distinct value. Disable the cache on that Engine if you render such pages.
 - **Keys are hashed.** Two different value sets could in principle collide on a 64-bit key. The test suite renders 2000 distinct value sets and asserts 2000 distinct outputs.
 
 ## Reload
@@ -217,56 +207,62 @@ Because reload mutates templates in place, it is **not** safe to run concurrentl
 
 ## Benchmarks
 
-Measured on `windows/amd64`, `AMD Ryzen 7 5700X` (8C/16T), Go 1.26.2, `-count=10`.
+Measured on `windows/amd64`, `AMD Ryzen 7 5700X` (8C/16T), Go 1.26.2.
 
 Reproduce with:
 
 ```
-go test ./core/ -run ^$ -bench "BenchmarkReplace" -benchmem -count=10
-go test ./core/ -run ^$ -bench "BenchmarkSinglePage" -benchmem -count=8
+go test ./core/ -run ^$ -bench "BenchmarkREADME" -benchmem
 ```
 
-### One placeholder in an HTML page
+### Cache hits do not depend on page size
 
-The common case: a whole page with a single `{{content}}` slot. This path is `memmove`-bound, so the number tracks page size.
+A hit is a hash of the values plus one map lookup, so the page can be any size.
+One placeholder, cache enabled:
 
-| Page size | Reused buffer | Fresh allocation | Penalty |
-|---|---:|---:|---:|
-| 1 KB | `16.4 ns` · 0 allocs | `190.7 ns` · 1 alloc | 11.6× |
-| 8 KB | `63.0 ns` · 0 allocs | `953.6 ns` · 1 alloc | 15.1× |
-| 32 KB | `478 ns` · 0 allocs | `3761 ns` · 1 alloc | 7.9× |
-| 128 KB | `1.87 µs` · 0 allocs | `11.78 µs` · 1 alloc | 6.3× |
-
-### Multiple placeholders (reused buffer, 0 allocs throughout)
-
-24-byte literals between slots, 12-byte values.
-
-| Slots | `[]string` pairs | `map[string]string` |
+| Page size | Cache hit | Cache miss |
 |---|---:|---:|
-| static (0) | `4.59 ns` | `4.00 ns` |
-| 1 | `11.97 ns` | `16.19 ns` |
-| 4 | `46.41 ns` | `60.05 ns` |
-| 8 | `77.22 ns` | `112.2 ns` |
-| 16 | `137.6 ns` | `221.6 ns` |
-| 64 | `567.8 ns` | `934.4 ns` |
+| 1 KB | `16.4 ns` · 0 allocs | `183 ns` · 1 alloc |
+| 8 KB | `16.3 ns` · 0 allocs | `989 ns` · 1 alloc |
+| 32 KB | `16.4 ns` · 0 allocs | `4.14 µs` · 1 alloc |
+| 128 KB | `16.6 ns` · 0 allocs | `10.2 µs` · 1 alloc |
 
-Representative HTML page, 14 placeholders: `119.7 ns` with pairs, `203.1 ns` with a map. Rendered concurrently across 16 threads: `18.73 ns` and `32.02 ns` per render respectively.
+A miss renders the page and stores it; every later call within the TTL is a hit.
 
-Passing values as `[]string` pairs is consistently faster than a `map[string]string`, because the map path pays Go's own hash lookup per key.
+### Hit cost tracks how many values you pass
+
+Hashing the values is the only per-call work, so cost scales with value count,
+not page size. Small page, varying placeholders:
+
+| Values | `[]string` pairs | `map[string]string` |
+|---|---:|---:|
+| 0 | `12.2 ns` | `15.8 ns` |
+| 1 | `17.6 ns` | `45.4 ns` |
+| 4 | `34.6 ns` | `73.4 ns` |
+| 8 | `56.1 ns` | `93.9 ns` |
+| 16 | `105 ns` | `231 ns` |
+| 64 | `390 ns` | `862 ns` |
+
+Passing `[]string` pairs is consistently faster than a `map[string]string`,
+because the map path additionally pays Go's map iteration on every call.
+
+All of the above are **0 allocations**.
 
 ### Loading
 
 | Operation | Time |
 |---|---:|
-| `Load` — cached single file | `21.2 µs` |
-| `Load` — cached directory bundle (3 files) | `96.6 µs` |
-| `Named` lookup on a bundle | `13.4 ns` |
+| `Load` — cached single file | `23.4 µs` |
+| `Load` — cached directory bundle | `91.6 µs` |
+| `Named` lookup on a bundle | `13.7 ns` |
 
-`Load` re-stats the file on every call to detect on-disk changes, and that syscall is ~90% of its cost on Windows. Call `Load` once at startup and hold the returned `*Template`; do not call it per request.
+`Load` re-stats the file on every call to detect on-disk changes, and that syscall is most of its cost on Windows. Call `Load` once at startup and hold the returned `*Template`; do not call it per request.
 
 ### Notes on reading these numbers
 
-Benchmarks re-render the same template in a loop, so the source stays in L1/L2 cache. A server cycling through many large distinct templates will see cache misses and run slower, particularly at 32 KB and above. The 1 KB and 8 KB figures are the most representative of real request handling.
+- Cache hits allocate nothing and are independent of page size.
+- A cache miss allocates exactly once: the rendered page itself.
+- Benchmarks that allocate vary by ±20% run to run on this machine because of GC timing. Zero-allocation rows are stable to within a few percent.
 
 ## Examples
 
@@ -292,7 +288,7 @@ func main() {
         panic(err)
     }
 
-    out, err := alos.Replace(tpl, nil, map[string]string{
+    out, err := alos.Replace(tpl, map[string]string{
         "name": "Alice",
         "role": "Admin",
     })
@@ -300,7 +296,7 @@ func main() {
         panic(err)
     }
 
-    fmt.Println(string(out))
+    fmt.Println(out)
     // <h1>Welcome, Alice!</h1>
     // <p>Your role is: Admin</p>
 }
@@ -350,7 +346,7 @@ func main() {
         panic(err)
     }
 
-    out, err := alos.Replace(bundle, nil, map[string]string{
+    out, err := alos.Replace(bundle, map[string]string{
         "title":     "Documentation",
         "subtitle":  "Fast placeholder replacement for Go web servers",
         "active":    "docs-selected",
@@ -360,7 +356,7 @@ func main() {
         panic(err)
     }
 
-    fmt.Println(string(out))
+    fmt.Println(out)
     // The nav and footer are inlined into index.alos at load time via include.
     // All four placeholders are replaced at render time.
 }
@@ -391,7 +387,7 @@ func main() {
         panic(err)
     }
 
-    out, err := alos.Replace(tpl, nil, map[string]string{
+    out, err := alos.Replace(tpl, map[string]string{
         "title":   "My Page",
         "heading": "Welcome",
         "content": "This uses <% %> delimiters.",
@@ -400,7 +396,7 @@ func main() {
         panic(err)
     }
 
-    fmt.Println(string(out))
+    fmt.Println(out)
 }
 ```
 
@@ -430,7 +426,7 @@ func main() {
     index := bundle.Named("index")
 
     http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        out, err := alos.Replace(index, nil, map[string]string{
+        out, err := alos.Replace(index, map[string]string{
             "title":     "Live Page",
             "subtitle":  "Edit the .alos files and they reload within 30s",
             "active":    "home",
@@ -441,7 +437,7 @@ func main() {
             return
         }
         w.Header().Set("Content-Type", "text/html")
-        w.Write(out)
+        io.WriteString(w, out)
     })
 
     fmt.Println("Listening on :8080 with 30s auto-refresh")
@@ -500,8 +496,8 @@ func main() {
     tpl1, _ := curly.Load("curly.alos")
     tpl2, _ := bracket.Load("bracket.alos")
 
-    out1, _ := alos.Replace(tpl1, nil, map[string]string{"title": "Curly"})
-    out2, _ := alos.Replace(tpl2, nil, map[string]string{"title": "Bracket"})
+    out1, _ := alos.Replace(tpl1, map[string]string{"title": "Curly"})
+    out2, _ := alos.Replace(tpl2, map[string]string{"title": "Bracket"})
 
     fmt.Println(string(out1)) // <h1>Curly</h1>
     fmt.Println(string(out2)) // <h1>Bracket</h1>
@@ -529,14 +525,14 @@ func main() {
         panic("missing nav template")
     }
 
-    out, err := alos.Replace(nav, nil, map[string]string{
+    out, err := alos.Replace(nav, map[string]string{
         "active": "home-selected",
     })
     if err != nil {
         panic(err)
     }
 
-    fmt.Println(string(out))
+    fmt.Println(out)
 }
 ```
 
@@ -587,12 +583,12 @@ func main() {
 
     // When a template has one placeholder, just pass a string.
     // The string fills that single placeholder regardless of its key name.
-    out, err := alos.Replace(tpl, nil, "Documentation Hub")
+    out, err := alos.Replace(tpl, "Documentation Hub")
     if err != nil {
         panic(err)
     }
 
-    fmt.Println(string(out))
+    fmt.Println(out)
     // <h1>Documentation Hub</h1>
 }
 ```
@@ -613,7 +609,7 @@ func main() {
         panic(err)
     }
 
-    out, err := alos.Replace(tpl, nil, []string{
+    out, err := alos.Replace(tpl, []string{
         "title", "Docs",
         "subtitle", "Fast placeholder replacement",
     })
@@ -621,7 +617,7 @@ func main() {
         panic(err)
     }
 
-    fmt.Println(string(out))
+    fmt.Println(out)
 }
 ```
 
@@ -644,8 +640,8 @@ func main() {
         panic(err)
     }
 
-    out, _ := alos.Replace(tpl, nil, map[string]string{"msg": "V1"})
-    fmt.Println(string(out)) // <p>V1</p>
+    out, _ := alos.Replace(tpl, map[string]string{"msg": "V1"})
+    fmt.Println(out) // <p>V1</p>
 
     // Edit the file on disk
     os.WriteFile("live.alos", []byte("<div>{{msg}}</div>"), 0644)
@@ -655,8 +651,8 @@ func main() {
         panic(err)
     }
 
-    out, _ = alos.Replace(tpl, nil, map[string]string{"msg": "V2"})
-    fmt.Println(string(out)) // <div>V2</div>
+    out, _ = alos.Replace(tpl, map[string]string{"msg": "V2"})
+    fmt.Println(out) // <div>V2</div>
 }
 ```
 
@@ -678,14 +674,14 @@ func main() {
     defer engine.Stop()
 
     tpl, _ := engine.Load("status.alos")
-    out, _ := alos.Replace(tpl, nil, map[string]string{"state": "OK"})
-    fmt.Println(string(out)) // Status: OK
+    out, _ := alos.Replace(tpl, map[string]string{"state": "OK"})
+    fmt.Println(out) // Status: OK
 
     os.WriteFile("status.alos", []byte("Current: {{state}}"), 0644)
     tpl.Reload()
 
-    out, _ = alos.Replace(tpl, nil, map[string]string{"state": "Updated"})
-    fmt.Println(string(out)) // Current: Updated
+    out, _ = alos.Replace(tpl, map[string]string{"state": "Updated"})
+    fmt.Println(out) // Current: Updated
 }
 ```
 
@@ -734,7 +730,7 @@ func main() {
     }
 
     layout := bundle.Named("layout")
-    out, err := alos.Replace(layout, nil, map[string]string{
+    out, err := alos.Replace(layout, map[string]string{
         "title":    "Home",
         "sitename": "ALOS CDN",
         "navlinks": "<a>Home</a> | <a>Docs</a>",
@@ -745,7 +741,7 @@ func main() {
         panic(err)
     }
 
-    fmt.Println(string(out))
+    fmt.Println(out)
 }
 ```
 
@@ -779,12 +775,12 @@ func main() {
     defer engine.Stop()
 
     bundle, _ := engine.Load("parts")
-    out, _ := alos.Replace(bundle, nil, map[string]string{
+    out, _ := alos.Replace(bundle, map[string]string{
         "title": "Deep Include",
         "body":  "This was included through two levels.",
     })
 
-    fmt.Println(string(out))
+    fmt.Println(out)
     // <body><div class="wrapper"><article><h1>Deep Include</h1>
     // <p>This was included through two levels.</p></article></div></body>
 }
@@ -812,11 +808,11 @@ func main() {
     defer engine.Stop()
 
     bundle, _ := engine.Load("demo")
-    out, _ := alos.Replace(bundle, nil, map[string]string{
+    out, _ := alos.Replace(bundle, map[string]string{
         "title": "Page Title",
     })
 
-    fmt.Println(string(out))
+    fmt.Println(out)
     // <body>{{nav}}<main>Page Title</main></body>
     //
     // {{nav}} stays as a placeholder — it is NOT replaced with nav.alos content.
@@ -854,7 +850,7 @@ func main() {
     errorTpl := bundle.Named("error")
 
     http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        out, err := alos.Replace(indexTpl, nil, map[string]string{
+        out, err := alos.Replace(indexTpl, map[string]string{
             "title":   "Home",
             "content": "<p>Welcome!</p>",
         })
@@ -863,17 +859,17 @@ func main() {
             return
         }
         w.Header().Set("Content-Type", "text/html")
-        w.Write(out)
+        io.WriteString(w, out)
     })
 
     http.HandleFunc("/error", func(w http.ResponseWriter, r *http.Request) {
-        out, _ := alos.Replace(errorTpl, nil, map[string]string{
+        out, _ := alos.Replace(errorTpl, map[string]string{
             "title":   "Error",
             "message": "Something went wrong.",
         })
         w.Header().Set("Content-Type", "text/html")
         w.WriteHeader(500)
-        w.Write(out)
+        io.WriteString(w, out)
     })
 
     fmt.Println("Listening on :8080")
@@ -899,11 +895,11 @@ func main() {
     tpl, _ := alos.Load("page.alos")
 
     // Only provide "title" — the other two placeholders are not in the map
-    out, _ := alos.Replace(tpl, nil, map[string]string{
+    out, _ := alos.Replace(tpl, map[string]string{
         "title": "Docs",
     })
 
-    fmt.Println(string(out))
+    fmt.Println(out)
     // <h1>Docs</h1><p>{{subtitle}}</p><span>{{extra}}</span>
     //
     // Missing keys stay as their original placeholder text.
@@ -928,12 +924,12 @@ func main() {
     defer engine.Stop()
 
     tpl, _ := engine.Load("minimal.alos")
-    out, _ := alos.Replace(tpl, nil, map[string]string{
+    out, _ := alos.Replace(tpl, map[string]string{
         "title": "Minimal",
         "body":  "Single-char delimiters work too.",
     })
 
-    fmt.Println(string(out))
+    fmt.Println(out)
     // <h1>Minimal</h1><p>Single-char delimiters work too.</p>
 }
 ```
@@ -958,9 +954,9 @@ func main() {
     os.WriteFile("arrow.alos", []byte("<h1><<title>></h1>"), 0644)
 
     tpl, _ := alos.Load("arrow.alos")
-    out, _ := alos.Replace(tpl, nil, map[string]string{"title": "Arrow Style"})
+    out, _ := alos.Replace(tpl, map[string]string{"title": "Arrow Style"})
 
-    fmt.Println(string(out))
+    fmt.Println(out)
     // <h1>Arrow Style</h1>
 }
 ```
@@ -1065,9 +1061,9 @@ func main() {
             "nav_about":   "",
             "nav_contact": "",
         })
-        out, _ := alos.Replace(index, nil, vals)
+        out, _ := alos.Replace(index, vals)
         w.Header().Set("Content-Type", "text/html")
-        w.Write(out)
+        io.WriteString(w, out)
     })
 
     http.HandleFunc("/about", func(w http.ResponseWriter, r *http.Request) {
@@ -1079,9 +1075,9 @@ func main() {
             "nav_about":   "active",
             "nav_contact": "",
         })
-        out, _ := alos.Replace(index, nil, vals)
+        out, _ := alos.Replace(index, vals)
         w.Header().Set("Content-Type", "text/html")
-        w.Write(out)
+        io.WriteString(w, out)
     })
 
     http.HandleFunc("/contact", func(w http.ResponseWriter, r *http.Request) {
@@ -1093,9 +1089,9 @@ func main() {
             "nav_about":   "",
             "nav_contact": "active",
         })
-        out, _ := alos.Replace(index, nil, vals)
+        out, _ := alos.Replace(index, vals)
         w.Header().Set("Content-Type", "text/html")
-        w.Write(out)
+        io.WriteString(w, out)
     })
 
     fmt.Println("Listening on :8080 with auto-refresh every 30s")
