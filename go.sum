@@ -1,2 +1,10 @@
-github.com/guno1928/alosmap v0.0.0-20260407053415-661a892b7449 h1:h9xzTWsmiqxH0p/gqBYjzkgrLQ6UqZ6g0OqIHwtu5dU=
-github.com/guno1928/alosmap v0.0.0-20260407053415-661a892b7449/go.mod h1:J+T1xYPbVFxFlTFCR+fvA6GcdfkNwuNbpmu+uw5g0ao=
+github.com/guno1928/alosmap v0.0.0-20260728040739-7f0633a4b947 h1:aFhL4Y31sAWWiaGCNIKVokR4u0HRHpj2CVTMY5RLvZ4=
+github.com/guno1928/alosmap v0.0.0-20260728040739-7f0633a4b947/go.mod h1:8qQvCRDYvZVcmQPeBtloAnPfJU/8xnkpwBstcQszvMc=
+github.com/klauspost/cpuid/v2 v2.2.10 h1:tBs3QSyvjDyFTq3uoc/9xFpCuOsJQFNPiAhYdw2skhE=
+github.com/klauspost/cpuid/v2 v2.2.10/go.mod h1:hqwkgyIinND0mEev00jJYCxPNVRVXFQeu1XKlok6oO0=
+github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=
+github.com/zeebo/assert v1.3.0/go.mod h1:Pq9JiuJQpG8JLJdtkwrJESF0Foym2/D9XMU5ciN/wJ0=
+github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=
+github.com/zeebo/xxh3 v1.1.0/go.mod h1:IisAie1LELR4xhVinxWS5+zf1lA4p0MW4T+w+W07F5s=
+golang.org/x/sys v0.30.0 h1:QjkSwP/36a20jFYWkSue1YwXzLmsV5Gfq7Eiy72C1uc=
+golang.org/x/sys v0.30.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=

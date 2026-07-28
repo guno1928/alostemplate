@@ -114,6 +114,26 @@ func Stop() {
 	defaultEngine.Stop()
 }
 
+// DefaultRenderCacheTTL is how long RenderCached retains a rendered page.
+const DefaultRenderCacheTTL = corepkg.DefaultRenderCacheTTL
+
+// RenderCacheDisabled disables the render cache when passed to WithRenderCache
+// or SetRenderCacheTTL.
+const RenderCacheDisabled = corepkg.RenderCacheDisabled
+
+// WithRenderCache returns an Option that sets how long a newly created Engine
+// retains rendered pages. Zero selects DefaultRenderCacheTTL; pass
+// RenderCacheDisabled to render on every call.
+func WithRenderCache(ttl time.Duration) Option { return corepkg.WithRenderCache(ttl) }
+
+// SetRenderCacheTTL changes the render cache lifetime for the package-level
+// default Engine.
+func SetRenderCacheTTL(ttl time.Duration) { defaultEngine.SetRenderCacheTTL(ttl) }
+
+// RenderCacheTTL reports the render cache lifetime of the package-level default
+// Engine. Zero means the cache is disabled.
+func RenderCacheTTL() time.Duration { return defaultEngine.RenderCacheTTL() }
+
 // Replace renders tpl into dst using one of the supported replacement formats.
 //
 // The values argument may be a string, a []string of flat key/value pairs, or

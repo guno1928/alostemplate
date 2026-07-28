@@ -7,8 +7,9 @@ Features:
 - **Configurable delimiters** — use `{{` `}}`, `<%` `%>`, `[%` `%]`, or anything you want
 - **Explicit includes** — `{{include "nav"}}` pulls one file into another at load time
 - **Auto-refresh** — set an interval and templates reload from disk automatically
-- **1 alloc/op** rendering with precompiled slot-based templates
-- **[alosmap](https://github.com/guno1928/alosmap)** for high-performance concurrent file caching
+- **Render cache, on by default** — repeat renders of the same template and values are served from a 4-second cache in ~17 ns with zero allocations
+- **Zero-allocation rendering** on every path — the cache allocates nothing on a hit, and supplying your own `dst` allocates nothing on a miss
+- **[alosmap](https://github.com/guno1928/alosmap)** typed maps for concurrent file and render caching
 
 ## Install
 
@@ -49,6 +50,8 @@ fmt.Println(string(out))
 | `Replace(tpl, dst, values)` | Render a template with placeholder values |
 | `SetDelimiters(left, right)` | Change delimiters for future loads |
 | `SetAutoRefresh(interval)` | Enable/disable periodic auto-reload (0 = off) |
+| `SetRenderCacheTTL(ttl)` | Change how long rendered output is cached |
+| `RenderCacheTTL()` | Current render cache lifetime (0 = disabled) |
 | `Delimiters()` | Returns current left and right delimiters |
 | `Stop()` | Stop the auto-refresh goroutine |
 
@@ -61,6 +64,8 @@ fmt.Println(string(out))
 | `engine.Reload()` | Reload all loaded templates |
 | `engine.SetDelimiters(l, r)` | Change delimiters at runtime |
 | `engine.SetAutoRefresh(d)` | Change auto-refresh interval at runtime |
+| `engine.SetRenderCacheTTL(d)` | Change render cache lifetime at runtime |
+| `engine.RenderCacheTTL()` | Get current render cache lifetime |
 | `engine.Delimiters()` | Get current delimiters |
 | `engine.AutoRefresh()` | Get current auto-refresh interval |
 | `engine.Stop()` | Stop engine and release resources |
@@ -72,6 +77,7 @@ fmt.Println(string(out))
 | `WithDelimiters(l, r)` | `{{`, `}}` | Set placeholder delimiters |
 | `WithAutoRefresh(d)` | `0` (off) | Auto-reload interval |
 | `WithModifiedOnly(bool)` | `false` | Only reload files whose on-disk signature changed |
+| `WithRenderCache(d)` | `4s` | Render cache lifetime. `0` selects the default; `RenderCacheDisabled` turns it off |
 
 ### Template Methods
 
@@ -82,6 +88,7 @@ fmt.Println(string(out))
 | `tpl.Name()` | Template's logical name (path without `.alos` extension) |
 | `tpl.FileName()` | Template's source file name |
 | `tpl.Reload()` | Reload this specific template from disk |
+| `tpl.ClearRenderCache()` | Drop every cached render for this template |
 
 ### Replace Inputs
 
@@ -131,12 +138,72 @@ Template names inside a bundle are the relative path with the `.alos` extension 
 
 ## How Replace Works
 
-`Replace` takes a compiled template and a set of values. It walks the precompiled slot list, looks up each placeholder key in the provided values, and writes the result into a single `[]byte` allocation.
+`Replace` takes a compiled template and a set of values. It resolves each placeholder key, then concatenates literals and values into the output buffer.
 
 - If a placeholder key is found in the values, the value is substituted.
 - If a placeholder key is **not** found, the original placeholder text (e.g. `{{title}}`) is left in the output unchanged. This makes missing keys visible during development.
 
-For templates with exactly one placeholder, a fast path using `unsafe.Pointer` + `memmove` is used. For templates with ≤4 placeholders, a stack-allocated array avoids pool overhead.
+### The `dst` argument decides who owns the output
+
+`Replace` has two modes, and neither allocates in steady state:
+
+| Call | Behaviour | Cost (75 KB page) |
+|---|---|---|
+| `Replace(tpl, nil, values)` | Served from the render cache. The returned slice is **owned by the engine** | ~17 ns, 0 allocs |
+| `Replace(tpl, dst, values)` | Rendered into **your** buffer, cache untouched | ~1090 ns, 0 allocs |
+
+```go
+// Cached. Fastest. Do not write into the result.
+out, err := alos.Replace(tpl, nil, values)
+w.Write(out)
+
+// Your buffer. Use when you need to own or mutate the bytes.
+var buf []byte
+for _, item := range items {
+    buf, err = alos.Replace(tpl, buf, item.Value)
+    w.Write(buf)
+}
+```
+
+> **The slice returned when `dst` is `nil` must be treated as read-only.**
+> It is shared with every other caller rendering the same template and values.
+> Writing into it corrupts their output. If you need a mutable buffer, pass your
+> own `dst`, or copy the result.
+
+### Fast paths
+
+- **Exactly one placeholder** — `unsafe.Pointer` + `memmove` for the prefix, value, and suffix. No key lookup at all, so cost tracks page size rather than template complexity.
+- **Up to 16 unique keys and 16 slots** — resolution and output layout use stack-resident arrays, so no pool is touched and nothing is allocated.
+- **Above those limits** — a pooled scratch buffer is used, still with no per-render allocation in steady state.
+- **Key resolution** — each template compiles an open-addressed hash index over its keys, so a `[]string` of pairs is resolved in one pass over the pairs rather than rescanning every pair once per key. Supplying pairs in template order takes an additional fast path.
+- **Output concatenation** — on `amd64`, a hand-written Plan 9 assembly gather (`gather_amd64.s`) concatenates the literal/value segments, with a pure-Go fallback on other platforms and under the `purego` build tag. Segments averaging 384 B–4 KB are routed to `runtime.memmove` instead, which is measurably faster than the assembly block loop in that band.
+
+## Render Cache
+
+Every template carries its own render cache, keyed on a hash of the values you pass. It is **enabled by default with a 4-second TTL**, and it only applies when `dst` is `nil`.
+
+```go
+// Default: cached for 4 seconds
+tpl, _ := alos.Load("page.alos")
+out, _ := alos.Replace(tpl, nil, values)   // ~17 ns on a hit, 0 allocations
+
+// Longer TTL for pages that rarely change
+e := alos.New(alos.WithRenderCache(30 * time.Second))
+
+// Off entirely
+e := alos.New(alos.WithRenderCache(alos.RenderCacheDisabled))
+
+// Drop one template's cached output immediately
+tpl.ClearRenderCache()
+```
+
+What you should know before relying on it:
+
+- **The cache is lazy, not refreshed in the background.** After the TTL expires, the next caller to arrive pays the full render cost synchronously. There is no background goroutine.
+- **Output can be up to the TTL stale.** If the values behind a page change, callers keep seeing the previous render until the entry expires.
+- **`Reload()` invalidates it.** Reloading a template clears its cached renders, so on-disk edits are never masked by the cache.
+- **Memory is bounded only by the TTL.** Each distinct set of values holds one rendered page until it expires. A page rendered with a high-cardinality value (a user ID, a session token) will store one entry per distinct value. Disable the cache or pass your own `dst` for those.
+- **Keys are hashed.** Two different value sets could in principle collide on a 64-bit key. The test suite renders 2000 distinct value sets and asserts 2000 distinct outputs.
 
 ## Reload
 
@@ -146,26 +213,60 @@ For templates with exactly one placeholder, a fast path using `unsafe.Pointer` +
 
 `SetAutoRefresh(interval)` starts a background goroutine that calls `Reload()` on every tick. Pass 0 to disable. `WithModifiedOnly(true)` makes the reload skip files whose mod-time and size have not changed.
 
+Because reload mutates templates in place, it is **not** safe to run concurrently with rendering. See [Concurrency](#concurrency) before enabling auto-refresh in a server.
+
 ## Benchmarks
 
-Benchmarks run on `windows/amd64` with an `AMD Ryzen 7 5700X`.
+Measured on `windows/amd64`, `AMD Ryzen 7 5700X` (8C/16T), Go 1.26.2, `-count=10`.
 
-Template bundle: `index.alos` (includes nav + footer via `{{include "..."}}`), `nav.alos`, `footer.alos`.
-Values: `title`, `subtitle`, `active`, `copyright`.
-Measured: repeated `Replace(bundle, nil, map[string]string{...})` on an already-loaded bundle.
+Reproduce with:
 
 ```
-go test -run ^$ -bench "^BenchmarkReplace$" -benchmem -count=1
+go test ./core/ -run ^$ -bench "BenchmarkReplace" -benchmem -count=10
+go test ./core/ -run ^$ -bench "BenchmarkSinglePage" -benchmem -count=8
 ```
 
-| Benchmark | ns/op | B/op | allocs/op |
+### One placeholder in an HTML page
+
+The common case: a whole page with a single `{{content}}` slot. This path is `memmove`-bound, so the number tracks page size.
+
+| Page size | Reused buffer | Fresh allocation | Penalty |
 |---|---:|---:|---:|
-| `small_1_panel_3_items` | `156.1` | `352` | `1` |
-| `medium_4_panels_12_items` | `292.0` | `896` | `1` |
-| `large_12_panels_36_items` | `710.8` | `2688` | `1` |
-| `xlarge_32_panels_96_items` | `1335` | `6144` | `1` |
+| 1 KB | `16.4 ns` · 0 allocs | `190.7 ns` · 1 alloc | 11.6× |
+| 8 KB | `63.0 ns` · 0 allocs | `953.6 ns` · 1 alloc | 15.1× |
+| 32 KB | `478 ns` · 0 allocs | `3761 ns` · 1 alloc | 7.9× |
+| 128 KB | `1.87 µs` · 0 allocs | `11.78 µs` · 1 alloc | 6.3× |
 
-1 alloc/op across all sizes. The single allocation is the returned `[]byte`.
+### Multiple placeholders (reused buffer, 0 allocs throughout)
+
+24-byte literals between slots, 12-byte values.
+
+| Slots | `[]string` pairs | `map[string]string` |
+|---|---:|---:|
+| static (0) | `4.59 ns` | `4.00 ns` |
+| 1 | `11.97 ns` | `16.19 ns` |
+| 4 | `46.41 ns` | `60.05 ns` |
+| 8 | `77.22 ns` | `112.2 ns` |
+| 16 | `137.6 ns` | `221.6 ns` |
+| 64 | `567.8 ns` | `934.4 ns` |
+
+Representative HTML page, 14 placeholders: `119.7 ns` with pairs, `203.1 ns` with a map. Rendered concurrently across 16 threads: `18.73 ns` and `32.02 ns` per render respectively.
+
+Passing values as `[]string` pairs is consistently faster than a `map[string]string`, because the map path pays Go's own hash lookup per key.
+
+### Loading
+
+| Operation | Time |
+|---|---:|
+| `Load` — cached single file | `21.2 µs` |
+| `Load` — cached directory bundle (3 files) | `96.6 µs` |
+| `Named` lookup on a bundle | `13.4 ns` |
+
+`Load` re-stats the file on every call to detect on-disk changes, and that syscall is ~90% of its cost on Windows. Call `Load` once at startup and hold the returned `*Template`; do not call it per request.
+
+### Notes on reading these numbers
+
+Benchmarks re-render the same template in a loop, so the source stays in L1/L2 cache. A server cycling through many large distinct templates will see cache misses and run slower, particularly at 32 KB and above. The 1 KB and 8 KB figures are the most representative of real request handling.
 
 ## Examples
 
@@ -725,6 +826,8 @@ func main() {
 
 ### 16. Web Server With Named Templates
 
+> **Warning:** this example combines `WithAutoRefresh` with concurrent HTTP handlers, which currently races. See [Concurrency](#concurrency). For production, drop the `WithAutoRefresh` option and reload explicitly instead.
+
 ```go
 package main
 
@@ -864,6 +967,8 @@ func main() {
 
 ### 20. Multi-Route Server With Shared Bundle
 
+> **Warning:** this example combines `WithAutoRefresh` with concurrent HTTP handlers, which currently races. See [Concurrency](#concurrency). For production, drop the `WithAutoRefresh` option and reload explicitly instead.
+
 `site/index.alos`:
 ```html
 <html>
@@ -1000,15 +1105,32 @@ func main() {
 
 ## Tests
 
-The `testallnow/` directory contains 100 tests covering:
+136 test functions across `core/` and the root package, covering every exported and unexported function:
 
 - Single file loading and rendering
 - Directory bundle loading with explicit includes
 - Custom delimiter configuration
-- Include directive parsing (double quotes, single quotes, chained, missing)
-- Replace edge cases (nil template, empty values, unicode, large values)
+- Include directive parsing (double quotes, single quotes, chained, cyclic, missing)
+- Replace edge cases (nil template, empty values, unicode, duplicate keys, missing keys, large values, output buffer reuse)
 - Auto-refresh and manual reload
 - Engine lifecycle, caching, and error paths
 - Package-level convenience API
+- Assembly gather verified byte-identical to the Go implementation across every length class
+- Concurrent render and concurrent load under the race detector
 
 ```
+go test ./...
+go test ./... -race
+go vet ./...
+```
+
+Benchmark alternatives used to select the current implementation live in `core/alt_resolve*_test.go` and `core/alt_copy_test.go`. Each alternative is proven equivalent to the original before it is benchmarked, so the selection is reproducible.
+
+## Concurrency
+
+`Replace` and `ReplaceMap` are safe to call concurrently on the same `*Template`. `Load` is safe to call concurrently on the same `*Engine`.
+
+> **Known issue — auto-refresh is not safe alongside concurrent rendering.**
+> `Reload` updates templates in place, and the background goroutine started by `WithAutoRefresh` / `SetAutoRefresh` writes template state while `Replace` reads it, with no synchronisation. The race detector reports this. `Stop()` does not establish ordering either, so there is no way for a caller to safely observe a refreshed template.
+>
+> Until this is fixed, do not enable auto-refresh in a process that renders concurrently. Prefer calling `Reload()` explicitly at a point where you control access, or reload into a fresh `Engine` and swap the pointer yourself. This is tracked by `TestAutoRefreshConcurrentRenderIsRacy` in `core/`.

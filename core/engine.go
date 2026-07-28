@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -29,15 +30,25 @@ import (
 // when the Engine is no longer needed so any background refresh goroutine and
 // cache resources can be released.
 type Engine struct {
-	leftDelim    string
-	rightDelim   string
-	fileCache    *alosmap.Map
-	pool         sync.Pool
-	refreshMu    sync.Mutex
-	refreshStop  chan struct{}
-	autoRefresh  time.Duration
-	modifiedOnly bool
+	leftDelim      string
+	rightDelim     string
+	fileCache      *alosmap.TypedMap[string, *parsedFileCacheEntry]
+	pool           sync.Pool
+	refreshMu      sync.Mutex
+	refreshStop    chan struct{}
+	autoRefresh    time.Duration
+	modifiedOnly   bool
+	renderCacheTTL atomic.Int64
 }
+
+const DefaultRenderCacheTTL = 4 * time.Second
+
+const RenderCacheDisabled = time.Duration(-1)
+
+// templateCachePreallocChunk is how many cache entry nodes each shard of the
+// template cache allocates at a time. Template counts are small, so the batch is
+// kept modest.
+const templateCachePreallocChunk = 16
 
 type EngineOption func(*Engine)
 
@@ -64,12 +75,41 @@ func WithModifiedOnly(enabled bool) EngineOption {
 	}
 }
 
+func WithRenderCache(ttl time.Duration) EngineOption {
+	return func(e *Engine) {
+		e.renderCacheTTL.Store(int64(normalizeRenderCacheTTL(ttl)))
+	}
+}
+
+func normalizeRenderCacheTTL(ttl time.Duration) time.Duration {
+	switch {
+	case ttl < 0:
+		return 0
+	case ttl == 0:
+		return DefaultRenderCacheTTL
+	default:
+		return ttl
+	}
+}
+
+func (e *Engine) SetRenderCacheTTL(ttl time.Duration) {
+	e.renderCacheTTL.Store(int64(normalizeRenderCacheTTL(ttl)))
+}
+
+func (e *Engine) RenderCacheTTL() time.Duration {
+	return time.Duration(e.renderCacheTTL.Load())
+}
+
 func NewEngine(opts ...EngineOption) *Engine {
 	e := &Engine{
 		leftDelim:  "{{",
 		rightDelim: "}}",
-		fileCache:  alosmap.New(),
+		// A typed map keeps cache entries as concrete pointers, so lookups avoid
+		// the interface boxing and type assertion the untyped map required.
+		// Entry nodes are allocated in batches to reduce churn as templates load.
+		fileCache: alosmap.NewTyped[string, *parsedFileCacheEntry]().Prealloc(templateCachePreallocChunk),
 	}
+	e.renderCacheTTL.Store(int64(DefaultRenderCacheTTL))
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -167,25 +207,83 @@ func (e *Engine) AutoRefresh() time.Duration {
 // sorted order otherwise. Templates are updated in place by Reload so existing
 // handles remain valid.
 type Template struct {
-	engine     *Engine
-	sourcePath string
-	loadPath   string
-	name       string
-	fileName   string
-	reloadName string
-	defaultTpl *Template
-	named      map[string]*Template
-	names      []string
-	literals   []string
-	keys       []string
-	slots      []slotRef
-	staticLen  int
-	single     singleSlot
+	engine      *Engine
+	sourcePath  string
+	loadPath    string
+	name        string
+	fileName    string
+	reloadName  string
+	defaultTpl  *Template
+	named       map[string]*Template
+	names       []string
+	literals    []string
+	keys        []string
+	slots       []slotRef
+	table       keyTable
+	staticLen   int
+	single      singleSlot
+	renderCache *alosmap.TypedMap[uint64, *[]byte]
+}
+
+func hashRenderValues(values map[string]string) uint64 {
+	combined := uint64(len(values))
+	for key, value := range values {
+		pair := hashPlaceholderKey(key)*0x100000001b3 ^ hashPlaceholderKey(value)
+		combined ^= pair * 0x9e3779b97f4a7c15
+	}
+	return combined
+}
+
+func hashRenderPairs(pairs []string) uint64 {
+	combined := uint64(len(pairs)) ^ 0x9e3779b97f4a7c15
+	for _, item := range pairs {
+		combined = (combined ^ hashPlaceholderKey(item)) * 0x100000001b3
+	}
+	return combined
+}
+
+func (tpl *Template) renderCacheTTL() time.Duration {
+	if tpl.engine == nil {
+		return DefaultRenderCacheTTL
+	}
+	return time.Duration(tpl.engine.renderCacheTTL.Load())
+}
+
+func (tpl *Template) ClearRenderCache() {
+	if tpl == nil {
+		return
+	}
+	if store := tpl.renderCache; store != nil {
+		store.Clear()
+	}
+	for _, child := range tpl.named {
+		if child != nil && child != tpl {
+			if store := child.renderCache; store != nil {
+				store.Clear()
+			}
+		}
+	}
 }
 
 type slotRef struct {
 	keyIndex    int
 	placeholder string
+}
+
+// keyTableEntry is one open-addressed bucket mapping a placeholder key to its
+// index in Template.keys.
+type keyTableEntry struct {
+	hash uint64
+	idx  int32
+	used int32
+}
+
+// keyTable is a compile-time hash index over a Template's unique keys. It lets
+// Replace resolve a flat key/value pair slice in one pass over the pairs rather
+// than rescanning every pair once per key.
+type keyTable struct {
+	mask    uint64
+	entries []keyTableEntry
 }
 
 type singleSlot struct {
@@ -203,21 +301,39 @@ type singleSlot struct {
 	staticLen   int
 }
 
+// cacheSignature identifies a cached template's on-disk state. For a single file
+// the modification time and size are compared directly, which avoids formatting
+// them into a string on every Load. Directories keep an exact listing string so
+// that added, removed, or renamed files are always detected.
+type cacheSignature struct {
+	modNanos int64
+	size     int64
+	listing  string
+}
+
 type parsedFileCacheEntry struct {
-	signature string
+	signature cacheSignature
 	tpl       *Template
 }
 
+// renderScratchPool holds scratch buffers for templates that exceed the inline
+// limits. Scratch objects are deliberately not pre-sized: sizing them for the
+// largest expected template made every pooled object ~3.2KB and measured 3.5%
+// slower through worse cache locality, while steady-state renders already
+// allocate nothing.
 var renderScratchPool sync.Pool
 
 type renderScratch struct {
 	resolved []string
 	found    []bool
+	parts    []string
 }
 
 type bundleSourceFile struct {
 	absPath    string
 	relPath    string
+	modNanos   int64
+	size       int64
 	canonical  string
 	baseName   string
 	fileName   string
@@ -257,10 +373,8 @@ func (e *Engine) Reload() error {
 		entry *parsedFileCacheEntry
 	}
 	var entries []pathEntry
-	e.fileCache.Range(func(key alosmap.Key, value any) bool {
-		path := key.StringVal()
+	e.fileCache.Range(func(path string, entry *parsedFileCacheEntry) bool {
 		if path != "" {
-			entry, _ := value.(*parsedFileCacheEntry)
 			entries = append(entries, pathEntry{path: path, entry: entry})
 		}
 		return true
@@ -273,7 +387,7 @@ func (e *Engine) Reload() error {
 		info, err := os.Stat(pe.path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				e.fileCache.Delete(alosmap.S(pe.path))
+				e.fileCache.Delete(pe.path)
 				continue
 			}
 			problems = append(problems, fmt.Sprintf("%s: %v", pe.path, err))
@@ -320,8 +434,7 @@ func (tpl *Template) Reload() error {
 		return fmt.Errorf("template has no source path")
 	}
 	root := tpl
-	if cached, ok := e.fileCache.Load(alosmap.S(path)); ok {
-		entry, _ := cached.(*parsedFileCacheEntry)
+	if entry, ok := e.fileCache.Load(path); ok {
 		if entry != nil && entry.tpl != nil {
 			root = entry.tpl
 		}
@@ -335,10 +448,9 @@ func (tpl *Template) Reload() error {
 		updatedRoot = tpl
 	}
 	applyTemplateReload(updatedRoot, reloaded)
-	if cached, ok := e.fileCache.Load(alosmap.S(path)); ok {
-		entry, _ := cached.(*parsedFileCacheEntry)
+	if entry, ok := e.fileCache.Load(path); ok {
 		if entry != nil {
-			e.fileCache.Store(alosmap.S(path), &parsedFileCacheEntry{signature: entry.signature, tpl: updatedRoot})
+			e.fileCache.Store(path, &parsedFileCacheEntry{signature: entry.signature, tpl: updatedRoot})
 		}
 	}
 	if tpl.reloadName != "" {
@@ -355,6 +467,9 @@ func applyTemplateReload(dst *Template, src *Template) {
 	if dst == nil || src == nil {
 		return
 	}
+	if store := dst.renderCache; store != nil {
+		store.Clear()
+	}
 	dst.sourcePath = src.sourcePath
 	dst.loadPath = src.loadPath
 	dst.name = src.name
@@ -363,6 +478,7 @@ func applyTemplateReload(dst *Template, src *Template) {
 	dst.literals = src.literals
 	dst.keys = src.keys
 	dst.slots = src.slots
+	dst.table = src.table
 	dst.staticLen = src.staticLen
 	dst.single = src.single
 	dst.engine = src.engine
@@ -391,7 +507,7 @@ func applyTemplateReload(dst *Template, src *Template) {
 				child = dst.named[normalizeTemplateName(srcChild.fileName)]
 			}
 			if child == nil {
-				child = &Template{}
+				child = &Template{renderCache: alosmap.NewTyped[uint64, *[]byte]()}
 			}
 			applyTemplateReload(child, srcChild)
 			childMap[srcChild] = child
@@ -512,20 +628,13 @@ func (tpl *Template) renderTarget() *Template {
 func (e *Engine) loadFile(abs string, info os.FileInfo, force bool) (*Template, error) {
 	signature := fileSignature(info)
 	if !force {
-		if cached, ok := e.fileCache.Load(alosmap.S(abs)); ok {
-			entry, _ := cached.(*parsedFileCacheEntry)
+		if entry, ok := e.fileCache.Load(abs); ok {
 			if entry != nil && entry.signature == signature {
 				return entry.tpl, nil
 			}
 		}
 	} else {
-		e.fileCache.Delete(alosmap.S(abs))
-	}
-	if cached, ok := e.fileCache.Load(alosmap.S(abs)); ok {
-		entry, _ := cached.(*parsedFileCacheEntry)
-		if entry != nil && entry.signature == signature {
-			return entry.tpl, nil
-		}
+		e.fileCache.Delete(abs)
 	}
 	raw, err := os.ReadFile(abs)
 	if err != nil {
@@ -536,7 +645,7 @@ func (e *Engine) loadFile(abs string, info os.FileInfo, force bool) (*Template, 
 		return nil, err
 	}
 	tpl.loadPath = abs
-	e.fileCache.Store(alosmap.S(abs), &parsedFileCacheEntry{signature: signature, tpl: tpl})
+	e.fileCache.Store(abs, &parsedFileCacheEntry{signature: signature, tpl: tpl})
 	return tpl, nil
 }
 
@@ -546,20 +655,13 @@ func (e *Engine) loadDirectory(abs string, force bool) (*Template, error) {
 		return nil, err
 	}
 	if !force {
-		if cached, ok := e.fileCache.Load(alosmap.S(abs)); ok {
-			entry, _ := cached.(*parsedFileCacheEntry)
+		if entry, ok := e.fileCache.Load(abs); ok {
 			if entry != nil && entry.signature == signature {
 				return entry.tpl, nil
 			}
 		}
 	} else {
-		e.fileCache.Delete(alosmap.S(abs))
-	}
-	if cached, ok := e.fileCache.Load(alosmap.S(abs)); ok {
-		entry, _ := cached.(*parsedFileCacheEntry)
-		if entry != nil && entry.signature == signature {
-			return entry.tpl, nil
-		}
+		e.fileCache.Delete(abs)
 	}
 	byCanonical := make(map[string]*bundleSourceFile, len(files))
 	baseCounts := make(map[string]int, len(files))
@@ -584,11 +686,12 @@ func (e *Engine) loadDirectory(abs string, force bool) (*Template, error) {
 		}
 	}
 	bundle := &Template{
-		engine:     e,
-		sourcePath: abs,
-		loadPath:   abs,
-		named:      make(map[string]*Template, len(aliases)),
-		names:      make([]string, 0, len(files)),
+		renderCache: alosmap.NewTyped[uint64, *[]byte](),
+		engine:      e,
+		sourcePath:  abs,
+		loadPath:    abs,
+		named:       make(map[string]*Template, len(aliases)),
+		names:       make([]string, 0, len(files)),
 	}
 	compiled := make(map[string]*Template, len(files))
 	for i := range files {
@@ -615,73 +718,203 @@ func (e *Engine) loadDirectory(abs string, force bool) (*Template, error) {
 		bundle.defaultTpl = compiled[normalizeTemplateName(bundle.names[0])]
 	}
 	bundle.reloadName = ""
-	e.fileCache.Store(alosmap.S(abs), &parsedFileCacheEntry{signature: signature, tpl: bundle})
+	e.fileCache.Store(abs, &parsedFileCacheEntry{signature: signature, tpl: bundle})
 	return bundle, nil
 }
 
-func Replace(tpl *Template, dst []byte, pairs []string) []byte {
-	if tpl == nil {
-		return dst[:0]
+// inlineKeyLimit and inlinePartLimit bound the stack-resident scratch used by
+// Replace. Templates larger than this fall back to the pooled scratch.
+const (
+	inlineKeyLimit  = 16
+	inlinePartLimit = 2*inlineKeyLimit + 1
+)
+
+// hashPlaceholderKey hashes a placeholder key. Keys are short, so the body reads
+// eight bytes at a time and finishes with a single avalanche step.
+func hashPlaceholderKey(s string) uint64 {
+	n := len(s)
+	h := uint64(0x9E3779B97F4A7C15) ^ uint64(n)
+	base := unsafe.Pointer(unsafe.StringData(s))
+	i := 0
+	// Offsets are only turned into pointers when the full read fits inside the
+	// string, so no pointer is ever formed past the end of the allocation.
+	for ; i+8 <= n; i += 8 {
+		h = (h ^ *(*uint64)(unsafe.Add(base, i))) * 0xff51afd7ed558ccd
 	}
-	tpl = tpl.renderTarget()
-	if tpl.single.enabled {
-		return tpl.replaceSingle(dst, pairs)
+	if i+4 <= n {
+		h = (h ^ uint64(*(*uint32)(unsafe.Add(base, i)))) * 0xff51afd7ed558ccd
+		i += 4
 	}
-	if len(tpl.slots) == 0 {
-		if cap(dst) < tpl.staticLen {
-			dst = make([]byte, 0, tpl.staticLen)
-		} else {
-			dst = dst[:0]
+	for ; i < n; i++ {
+		h = (h ^ uint64(s[i])) * 0xff51afd7ed558ccd
+	}
+	h ^= h >> 29
+	h *= 0xc2b2ae3d27d4eb4f
+	h ^= h >> 32
+	return h
+}
+
+func buildKeyTable(keys []string) keyTable {
+	size := uint64(8)
+	for size < uint64(len(keys))*2 {
+		size <<= 1
+	}
+	t := keyTable{mask: size - 1, entries: make([]keyTableEntry, size)}
+	for i, k := range keys {
+		h := hashPlaceholderKey(k)
+		pos := h & t.mask
+		for t.entries[pos].used != 0 {
+			pos = (pos + 1) & t.mask
 		}
-		return append(dst, tpl.literals[0]...)
+		t.entries[pos] = keyTableEntry{hash: h, idx: int32(i), used: 1}
+	}
+	return t
+}
+
+// resolvePairs fills resolved and found for every template key from a flat
+// key/value pair slice. It preserves the first-occurrence-wins behaviour of
+// findReplacement while touching each pair once instead of rescanning the whole
+// slice per key.
+func (tpl *Template) resolvePairs(pairs []string, resolved []string, found []bool) {
+	keys := tpl.keys
+	n := len(keys)
+
+	// Callers commonly build pairs in template order. Verifying that costs one
+	// compare per key and skips the hash probe entirely when it holds. Template
+	// keys are unique, so a positional match cannot hide a duplicate.
+	if len(pairs) == n*2 && len(resolved) >= n && len(found) >= n {
+		i := 0
+		for ; i < n; i++ {
+			if pairs[i*2] != keys[i] {
+				break
+			}
+		}
+		if i == n {
+			resolved = resolved[:n]
+			found = found[:n]
+			for j := range resolved {
+				resolved[j] = pairs[j*2+1]
+				found[j] = true
+			}
+			return
+		}
 	}
 
-	var inlineResolved [8]string
-	var inlineFound [8]bool
-	resolved := inlineResolved[:0]
-	found := inlineFound[:0]
-	var pooled *renderScratch
-	if len(tpl.keys) <= len(inlineResolved) {
-		resolved = inlineResolved[:len(tpl.keys)]
-		found = inlineFound[:len(tpl.keys)]
-	} else {
-		pooled = acquireRenderScratch(len(tpl.keys))
-		defer releaseRenderScratch(pooled, len(tpl.keys))
-		resolved = pooled.resolved[:len(tpl.keys)]
-		found = pooled.found[:len(tpl.keys)]
-	}
-	for i, key := range tpl.keys {
-		value, ok := findReplacement(pairs, key)
-		if ok {
-			resolved[i] = value
-			found[i] = true
+	mask := tpl.table.mask
+	entries := tpl.table.entries
+	for i := 0; i+1 < len(pairs); i += 2 {
+		pk := pairs[i]
+		h := hashPlaceholderKey(pk)
+		pos := h & mask
+		for {
+			e := &entries[pos]
+			if e.used == 0 {
+				break
+			}
+			if e.hash == h && keys[e.idx] == pk {
+				if !found[e.idx] {
+					resolved[e.idx] = pairs[i+1]
+					found[e.idx] = true
+				}
+				break
+			}
+			pos = (pos + 1) & mask
 		}
 	}
+}
 
+// emitParts interleaves literals and per-slot values into parts, returns the
+// total output length, and is the single place the render output is laid out.
+// parts is appended to from an empty slice with sufficient capacity. Appending
+// benchmarked faster than indexed writes here, because it advances a pointer
+// instead of bounds-checking every element against the slice length.
+func (tpl *Template) emitParts(parts []string, resolved []string, found []bool) ([]string, int) {
 	total := tpl.staticLen
-	for _, slot := range tpl.slots {
-		if found[slot.keyIndex] {
-			total += len(resolved[slot.keyIndex])
-		} else {
-			total += len(slot.placeholder)
-		}
+	slots := tpl.slots
+	literals := tpl.literals
+	if len(literals) < len(slots)+1 {
+		return parts, total
 	}
+	literals = literals[:len(slots)+1]
+	for i, slot := range slots {
+		var value string
+		if found[slot.keyIndex] {
+			value = resolved[slot.keyIndex]
+		} else {
+			value = slot.placeholder
+		}
+		total += len(value)
+		parts = append(parts, literals[i], value)
+	}
+	parts = append(parts, literals[len(slots)])
+	return parts, total
+}
 
+// gatherParts concatenates parts into a correctly sized dst. A string header is
+// laid out exactly like gatherSeg, so parts is handed to the gather directly
+// with no per-segment conversion.
+const (
+	memmoveGatherMinAverage = 384
+	memmoveGatherMaxAverage = 4096
+)
+
+func gatherParts(dst []byte, parts []string, total int) []byte {
 	if cap(dst) < total {
 		dst = make([]byte, total)
 	} else {
 		dst = dst[:total]
 	}
-	pos := 0
-	for i, slot := range tpl.slots {
-		pos += copy(dst[pos:], tpl.literals[i])
-		if found[slot.keyIndex] {
-			pos += copy(dst[pos:], resolved[slot.keyIndex])
-		} else {
-			pos += copy(dst[pos:], slot.placeholder)
-		}
+	if total == 0 {
+		return dst
 	}
-	copy(dst[pos:], tpl.literals[len(tpl.literals)-1])
+	base := unsafe.Pointer(unsafe.SliceData(dst))
+	segs := unsafe.Pointer(unsafe.SliceData(parts))
+	n := len(parts)
+	if total >= n*memmoveGatherMinAverage && total < n*memmoveGatherMaxAverage {
+		gatherGo(base, segs, n)
+		return dst
+	}
+	gatherAsm(base, segs, n)
+	return dst
+}
+
+func (tpl *Template) renderStatic(dst []byte) []byte {
+	if cap(dst) < tpl.staticLen {
+		dst = make([]byte, 0, tpl.staticLen)
+	} else {
+		dst = dst[:0]
+	}
+	return append(dst, tpl.literals[0]...)
+}
+
+func renderPairsInto(tpl *Template, dst []byte, pairs []string) []byte {
+	if tpl.single.enabled {
+		return tpl.replaceSingle(dst, pairs)
+	}
+	if len(tpl.slots) == 0 {
+		return tpl.renderStatic(dst)
+	}
+
+	nKeys := len(tpl.keys)
+	nParts := 2*len(tpl.slots) + 1
+	if nKeys <= inlineKeyLimit && nParts <= inlinePartLimit {
+		var inlineResolved [inlineKeyLimit]string
+		var inlineFound [inlineKeyLimit]bool
+		var inlineParts [inlinePartLimit]string
+		resolved := inlineResolved[:nKeys]
+		found := inlineFound[:nKeys]
+		tpl.resolvePairs(pairs, resolved, found)
+		parts, total := tpl.emitParts(inlineParts[:0], resolved, found)
+		return gatherParts(dst, parts, total)
+	}
+
+	pooled := acquireRenderScratch(nKeys, nParts)
+	resolved := pooled.resolved[:nKeys]
+	found := pooled.found[:nKeys]
+	tpl.resolvePairs(pairs, resolved, found)
+	parts, total := tpl.emitParts(pooled.parts[:0], resolved, found)
+	dst = gatherParts(dst, parts, total)
+	releaseRenderScratch(pooled, nKeys)
 	return dst
 }
 
@@ -690,100 +923,97 @@ func ReplaceMap(tpl *Template, dst []byte, values map[string]string) []byte {
 		return dst[:0]
 	}
 	tpl = tpl.renderTarget()
+	store, ttl := tpl.renderCacheFor(dst)
+	if store == nil {
+		return renderMapInto(tpl, dst, values)
+	}
+	key := hashRenderValues(values)
+	if hit, ok := store.Load(key); ok && hit != nil {
+		return *hit
+	}
+	out := renderMapInto(tpl, nil, values)
+	stored := out
+	store.StoreWithTTL(key, &stored, ttl)
+	return out
+}
+
+func Replace(tpl *Template, dst []byte, pairs []string) []byte {
+	if tpl == nil {
+		return dst[:0]
+	}
+	tpl = tpl.renderTarget()
+	store, ttl := tpl.renderCacheFor(dst)
+	if store == nil {
+		return renderPairsInto(tpl, dst, pairs)
+	}
+	key := hashRenderPairs(pairs)
+	if hit, ok := store.Load(key); ok && hit != nil {
+		return *hit
+	}
+	out := renderPairsInto(tpl, nil, pairs)
+	stored := out
+	store.StoreWithTTL(key, &stored, ttl)
+	return out
+}
+
+func (tpl *Template) renderCacheFor(dst []byte) (*alosmap.TypedMap[uint64, *[]byte], time.Duration) {
+	if dst != nil {
+		return nil, 0
+	}
+	store := tpl.renderCache
+	if store == nil {
+		return nil, 0
+	}
+	ttl := tpl.renderCacheTTL()
+	if ttl <= 0 {
+		return nil, 0
+	}
+	return store, ttl
+}
+
+func renderMapInto(tpl *Template, dst []byte, values map[string]string) []byte {
 	if tpl.single.enabled {
 		return tpl.replaceSingleMap(dst, values)
 	}
 	if len(tpl.slots) == 0 {
-		if cap(dst) < tpl.staticLen {
-			dst = make([]byte, 0, tpl.staticLen)
-		} else {
-			dst = dst[:0]
-		}
-		return append(dst, tpl.literals[0]...)
-	}
-	if len(tpl.slots) <= 4 {
-		return tpl.replaceMapSmall(dst, values)
+		return tpl.renderStatic(dst)
 	}
 
-	var inlineResolved [8]string
-	var inlineFound [8]bool
-	resolved := inlineResolved[:0]
-	found := inlineFound[:0]
-	var pooled *renderScratch
-	if len(tpl.keys) <= len(inlineResolved) {
-		resolved = inlineResolved[:len(tpl.keys)]
-		found = inlineFound[:len(tpl.keys)]
-	} else {
-		pooled = acquireRenderScratch(len(tpl.keys))
-		defer releaseRenderScratch(pooled, len(tpl.keys))
-		resolved = pooled.resolved[:len(tpl.keys)]
-		found = pooled.found[:len(tpl.keys)]
-	}
-	for i, key := range tpl.keys {
-		value, ok := values[key]
-		if ok {
-			resolved[i] = value
-			found[i] = true
-		}
+	nKeys := len(tpl.keys)
+	nParts := 2*len(tpl.slots) + 1
+	if nKeys <= inlineKeyLimit && nParts <= inlinePartLimit {
+		var inlineResolved [inlineKeyLimit]string
+		var inlineFound [inlineKeyLimit]bool
+		var inlineParts [inlinePartLimit]string
+		resolved := inlineResolved[:nKeys]
+		found := inlineFound[:nKeys]
+		resolveMapValues(tpl.keys, values, resolved, found)
+		parts, total := tpl.emitParts(inlineParts[:0], resolved, found)
+		return gatherParts(dst, parts, total)
 	}
 
-	total := tpl.staticLen
-	for _, slot := range tpl.slots {
-		if found[slot.keyIndex] {
-			total += len(resolved[slot.keyIndex])
-		} else {
-			total += len(slot.placeholder)
-		}
-	}
-
-	if cap(dst) < total {
-		dst = make([]byte, total)
-	} else {
-		dst = dst[:total]
-	}
-	pos := 0
-	for i, slot := range tpl.slots {
-		pos += copy(dst[pos:], tpl.literals[i])
-		if found[slot.keyIndex] {
-			pos += copy(dst[pos:], resolved[slot.keyIndex])
-		} else {
-			pos += copy(dst[pos:], slot.placeholder)
-		}
-	}
-	copy(dst[pos:], tpl.literals[len(tpl.literals)-1])
+	pooled := acquireRenderScratch(nKeys, nParts)
+	resolved := pooled.resolved[:nKeys]
+	found := pooled.found[:nKeys]
+	resolveMapValues(tpl.keys, values, resolved, found)
+	parts, total := tpl.emitParts(pooled.parts[:0], resolved, found)
+	dst = gatherParts(dst, parts, total)
+	releaseRenderScratch(pooled, nKeys)
 	return dst
 }
 
-func (tpl *Template) replaceMapSmall(dst []byte, values map[string]string) []byte {
-	var resolved [4]string
-	var found [4]bool
-	total := tpl.staticLen
-	for i, slot := range tpl.slots {
-		value, ok := values[tpl.keys[slot.keyIndex]]
-		if ok {
+// resolveMapValues looks up each unique template key once, so a key repeated
+// across many slots costs a single map probe.
+func resolveMapValues(keys []string, values map[string]string, resolved []string, found []bool) {
+	if len(values) == 0 {
+		return
+	}
+	for i, key := range keys {
+		if value, ok := values[key]; ok {
 			resolved[i] = value
 			found[i] = true
-			total += len(value)
-		} else {
-			total += len(slot.placeholder)
 		}
 	}
-	if cap(dst) < total {
-		dst = make([]byte, total)
-	} else {
-		dst = dst[:total]
-	}
-	pos := 0
-	for i, slot := range tpl.slots {
-		pos += copy(dst[pos:], tpl.literals[i])
-		if found[i] {
-			pos += copy(dst[pos:], resolved[i])
-		} else {
-			pos += copy(dst[pos:], slot.placeholder)
-		}
-	}
-	copy(dst[pos:], tpl.literals[len(tpl.literals)-1])
-	return dst
 }
 
 func (tpl *Template) replaceSingle(dst []byte, pairs []string) []byte {
@@ -922,11 +1152,15 @@ func (e *Engine) compileSource(src string) (*Template, error) {
 	}
 
 	tpl := &Template{
-		engine:    e,
-		literals:  literals,
-		keys:      keys,
-		slots:     slots,
-		staticLen: staticLen,
+		renderCache: alosmap.NewTyped[uint64, *[]byte](),
+		engine:      e,
+		literals:    literals,
+		keys:        keys,
+		slots:       slots,
+		staticLen:   staticLen,
+	}
+	if len(slots) > 1 {
+		tpl.table = buildKeyTable(keys)
 	}
 	if len(slots) == 1 {
 		tpl.single = singleSlot{
@@ -959,7 +1193,7 @@ func (e *Engine) compileNamedTemplate(absPath string, relPath string, src string
 	return tpl, nil
 }
 
-func acquireRenderScratch(size int) *renderScratch {
+func acquireRenderScratch(size int, parts int) *renderScratch {
 	pooled, _ := renderScratchPool.Get().(*renderScratch)
 	if pooled == nil {
 		pooled = &renderScratch{}
@@ -974,6 +1208,11 @@ func acquireRenderScratch(size int) *renderScratch {
 	} else {
 		pooled.found = pooled.found[:size]
 	}
+	if cap(pooled.parts) < parts {
+		pooled.parts = make([]string, parts)
+	} else {
+		pooled.parts = pooled.parts[:parts]
+	}
 	return pooled
 }
 
@@ -982,10 +1221,14 @@ func releaseRenderScratch(pooled *renderScratch, size int) {
 		return
 	}
 	clear(pooled.resolved[:size])
+	clear(pooled.found[:size])
+	// parts holds string headers for the render just finished; clearing it stops
+	// the pool from pinning those strings alive until the next render.
+	clear(pooled.parts)
 	renderScratchPool.Put(pooled)
 }
 
-func scanTemplateDirectory(root string) ([]bundleSourceFile, string, error) {
+func scanTemplateDirectory(root string) ([]bundleSourceFile, cacheSignature, error) {
 	files := make([]bundleSourceFile, 0, 8)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -997,6 +1240,8 @@ func scanTemplateDirectory(root string) ([]bundleSourceFile, string, error) {
 		if !strings.EqualFold(filepath.Ext(d.Name()), ".alos") {
 			return nil
 		}
+		// WalkDir already carries the directory entry's metadata, so reuse it
+		// instead of issuing a second stat syscall per file below.
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -1005,33 +1250,33 @@ func scanTemplateDirectory(root string) ([]bundleSourceFile, string, error) {
 		if err != nil {
 			return err
 		}
-		files = append(files, bundleSourceFile{absPath: path, relPath: relPath})
-		_ = info
+		files = append(files, bundleSourceFile{
+			absPath:  path,
+			relPath:  relPath,
+			modNanos: info.ModTime().UnixNano(),
+			size:     info.Size(),
+		})
 		return nil
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, cacheSignature{}, err
 	}
 	if len(files) == 0 {
-		return nil, "", fmt.Errorf("no .alos files found in %s", root)
+		return nil, cacheSignature{}, fmt.Errorf("no .alos files found in %s", root)
 	}
 	sort.Slice(files, func(i, j int) bool {
 		return filepath.ToSlash(files[i].relPath) < filepath.ToSlash(files[j].relPath)
 	})
-	var signature strings.Builder
+	listing := make([]byte, 0, len(files)*48)
 	for i := range files {
-		info, err := os.Stat(files[i].absPath)
-		if err != nil {
-			return nil, "", err
-		}
-		signature.WriteString(filepath.ToSlash(files[i].relPath))
-		signature.WriteByte('|')
-		signature.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
-		signature.WriteByte('|')
-		signature.WriteString(strconv.FormatInt(info.Size(), 10))
-		signature.WriteByte(';')
+		listing = append(listing, filepath.ToSlash(files[i].relPath)...)
+		listing = append(listing, '|')
+		listing = strconv.AppendInt(listing, files[i].modNanos, 10)
+		listing = append(listing, '|')
+		listing = strconv.AppendInt(listing, files[i].size, 10)
+		listing = append(listing, ';')
 	}
-	return files, signature.String(), nil
+	return files, cacheSignature{listing: string(listing)}, nil
 }
 
 func (e *Engine) expandBundleSource(file *bundleSourceFile, aliases map[string]*bundleSourceFile) (string, error) {
@@ -1109,20 +1354,43 @@ func parseIncludeDirective(inner string) (string, bool) {
 	return arg[1 : 1+end], true
 }
 
-func fileSignature(info os.FileInfo) string {
-	return strconv.FormatInt(info.ModTime().UnixNano(), 10) + ":" + strconv.FormatInt(info.Size(), 10)
+func fileSignature(info os.FileInfo) cacheSignature {
+	return cacheSignature{modNanos: info.ModTime().UnixNano(), size: info.Size()}
 }
 
 func trimTemplateExtension(name string) string {
 	clean := filepath.ToSlash(strings.TrimSpace(name))
-	if strings.HasSuffix(strings.ToLower(clean), ".alos") {
+	if hasTemplateExtension(clean) {
 		return clean[:len(clean)-len(".alos")]
 	}
 	return clean
 }
 
 func normalizeTemplateName(name string) string {
+	// Lookups usually pass an already-normalised name, so scan first and only
+	// allocate when the string actually needs rewriting.
+	if !needsNormalizing(name) {
+		return name
+	}
 	return strings.ToLower(trimTemplateExtension(name))
+}
+
+func needsNormalizing(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '\\' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+	return hasTemplateExtension(name)
+}
+
+func hasTemplateExtension(name string) bool {
+	const ext = ".alos"
+	if len(name) < len(ext) {
+		return false
+	}
+	return strings.EqualFold(name[len(name)-len(ext):], ext)
 }
 
 func findReplacement(pairs []string, key string) (string, bool) {
