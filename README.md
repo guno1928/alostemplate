@@ -7,9 +7,10 @@ Features:
 - **Configurable delimiters** — use `{{` `}}`, `<%` `%>`, `[%` `%]`, or anything you want
 - **Explicit includes** — `{{include "nav"}}` pulls one file into another at load time
 - **Auto-refresh** — set an interval and templates reload from disk automatically
-- **Render cache, on by default** — repeat renders of the same template and values are served from a 4-second cache in ~17 ns with zero allocations
+- **Render cache, on by default** — repeat renders of the same template and values are served from a 4-second cache in about 8–13 ns for a one-value page, with zero allocations
 - **Returns a `string`** — immutable, so cached pages are shared safely with no copy and no read-only caveats
-- **[alosmap](https://github.com/guno1928/alosmap)** typed maps for concurrent file and render caching
+- **Zero-allocation rendering** — `AppendReplace` renders into a buffer you reuse
+- **[alosmap](https://github.com/guno1928/alosmap)** typed map for the concurrent file cache
 
 ## Install
 
@@ -48,6 +49,7 @@ fmt.Println(out)
 | `Load(path)` | Load a single `.alos` file or a directory bundle |
 | `Reload()` | Force re-read all loaded templates from disk |
 | `Replace(tpl, values)` | Render a template with placeholder values |
+| `AppendReplace(dst, tpl, values)` | Render onto the end of `dst` and return it; no cache, no allocation once `dst` is large enough |
 | `SetDelimiters(left, right)` | Change delimiters for future loads |
 | `SetAutoRefresh(interval)` | Enable/disable periodic auto-reload (0 = off) |
 | `SetRenderCacheTTL(ttl)` | Change how long rendered output is cached |
@@ -146,10 +148,10 @@ Template names inside a bundle are the relative path with the `.alos` extension 
 
 `Replace` returns a `string`, and results are served from the render cache:
 
-| | Cost (75 KB page) | Allocations |
+| | Cost (128 KB page, one value) | Allocations |
 |---|---|---|
-| Cache hit | **~17 ns** | **0** |
-| Cache miss (renders, then caches) | ~1500 ns | 1 |
+| Cache hit | **~8 ns** | **0** |
+| Cache miss (renders, then caches) | ~14 µs | 2 |
 
 ```go
 out, err := alos.Replace(tpl, values)
@@ -158,15 +160,29 @@ io.WriteString(w, out)
 
 Because the result is a `string`, it is immutable. The engine can hand the same
 page to every caller with equal values at no cost, and there is nothing a caller
-can do to corrupt it. You never manage an output buffer.
+can do to corrupt it.
+
+### Rendering into your own buffer
+
+`AppendReplace` renders onto the end of a `[]byte` and returns it. It skips the
+cache and allocates nothing once the buffer is big enough, so it is the right
+call for pages whose values are different on every request.
+
+```go
+buf = buf[:0]
+buf, err = alos.AppendReplace(buf, tpl, values)
+w.Write(buf)
+```
+
+It accepts the same value types as `Replace` and produces the same bytes.
 
 ### Fast paths
 
-- **Exactly one placeholder** — `unsafe.Pointer` + `memmove` for the prefix, value, and suffix. No key lookup at all, so cost tracks page size rather than template complexity.
-- **Up to 16 unique keys and 16 slots** — resolution and output layout use stack-resident arrays, so no pool is touched and nothing is allocated.
-- **Above those limits** — a pooled scratch buffer is used, still with no per-render allocation in steady state.
-- **Key resolution** — each template compiles an open-addressed hash index over its keys, so a `[]string` of pairs is resolved in one pass over the pairs rather than rescanning every pair once per key. Supplying pairs in template order takes an additional fast path.
-- **Output concatenation** — on `amd64`, a hand-written Plan 9 assembly gather (`gather_amd64.s`) concatenates the literal/value segments, with a pure-Go fallback on other platforms and under the `purego` build tag. Segments averaging 384 B–4 KB are routed to `runtime.memmove` instead, which is measurably faster than the assembly block loop in that band.
+- **No placeholders** — the template text is returned directly with no copy.
+- **Pairs supplied in template order** — keys are checked in place and the literals and values are copied straight into the output in one pass, with no intermediate tables.
+- **Any other pair order, repeated keys, or more than 16 keys** — each template compiles an open-addressed hash index over its keys, so pairs are resolved in one pass. Templates past the inline limits use a pooled scratch buffer, still with no per-render allocation in steady state.
+- **Output concatenation** — on `amd64`, hand-written Plan 9 assembly (`gather_amd64.s`) copies the segments, using AVX2 for segments of 128 bytes and up when the CPU has it. Other platforms and the `purego` build tag use a pure-Go version built on `runtime.memmove`.
+- **New strings are not zeroed first** — the output is allocated uninitialised and then completely overwritten.
 
 ## Render Cache
 
@@ -175,7 +191,7 @@ Every template carries its own render cache, keyed on a hash of the values you p
 ```go
 // Default: cached for 4 seconds
 tpl, _ := alos.Load("page.alos")
-out, _ := alos.Replace(tpl, values)   // ~17 ns on a hit, 0 allocations
+out, _ := alos.Replace(tpl, values)   // ~8 ns on a hit for one value, 0 allocations
 
 // Longer TTL for pages that rarely change
 e := alos.New(alos.WithRenderCache(30 * time.Second))
@@ -191,78 +207,171 @@ What you should know before relying on it:
 
 - **The cache is lazy, not refreshed in the background.** After the TTL expires, the next caller to arrive pays the full render cost synchronously. There is no background goroutine.
 - **Output can be up to the TTL stale.** If the values behind a page change, callers keep seeing the previous render until the entry expires.
-- **`Reload()` invalidates it.** Reloading a template clears its cached renders, so on-disk edits are never masked by the cache.
-- **Memory is bounded only by the TTL.** Each distinct set of values holds one rendered page until it expires. A page rendered with a high-cardinality value (a user ID, a session token) will store one entry per distinct value. Disable the cache on that Engine if you render such pages.
-- **Keys are hashed.** Two different value sets could in principle collide on a 64-bit key. The test suite renders 2000 distinct value sets and asserts 2000 distinct outputs.
+- **`Reload()` invalidates it.** A reloaded template starts with an empty cache, so on-disk edits are never masked by the cache.
+- **Memory is bounded.** Each template keeps at most 512 rendered pages. A new page replaces an expired one, or the older of two candidates when both are still live. Expired pages are released when their slot is reused or the cache is cleared, not on a timer.
+- **High-cardinality pages gain nothing.** A page rendered with a different value every time (a user ID, a session token) never hits and still pays for hashing and storing. Use `AppendReplace` for those, or disable the cache on that Engine.
+- **TTL resolution is about 1 ms.** Expiry is checked against a cached clock.
+- **Keys are hashed with per-process random secrets.** Two different value sets could in principle collide on a 64-bit key, but the key cannot be predicted or collided from outside the process.
 
 ## Reload
 
-`Reload()` walks everything already loaded by the engine, re-reads files from disk, and updates the compiled templates in place. Existing template handles (pointers returned by `Load` or `Named`) remain valid after reload — they are updated, not replaced. This means you can hold onto a `*Template` at server startup and it will reflect the latest file content after any reload.
+`Reload()` walks everything already loaded by the engine, re-reads files from disk, and swaps in freshly compiled templates. Existing template handles (pointers returned by `Load` or `Named`) remain valid after reload and render the new content. This means you can hold onto a `*Template` at server startup and it will reflect the latest file content after any reload.
 
 `tpl.Reload()` reloads a single template (or bundle) rather than all loaded templates.
 
 `SetAutoRefresh(interval)` starts a background goroutine that calls `Reload()` on every tick. Pass 0 to disable. `WithModifiedOnly(true)` makes the reload skip files whose mod-time and size have not changed.
 
-Because reload mutates templates in place, it is **not** safe to run concurrently with rendering. See [Concurrency](#concurrency) before enabling auto-refresh in a server.
+A reload publishes each new template in one atomic step, so it is safe to run while other goroutines render. A render sees either the old template or the new one, never a mix.
 
 ## Benchmarks
 
-Measured on `windows/amd64`, `AMD Ryzen 7 5700X` (8C/16T), Go 1.26.2.
+Measured on `windows/amd64`, `AMD Ryzen 7 5700X` (8C/16T), Go 1.26.2, Rust 1.94.0.
+
+Every cell is **time per render · renders per second on one core**. Each case
+ran in its own process and the fastest of five runs is shown (fastest of two
+criterion runs for Rust). All engines render the same seven templates and a test
+asserts their output is byte-identical. Bold marks the fastest engine in a row.
+
+Compared against:
+
+- [quicktemplate](https://github.com/valyala/quicktemplate) v1.8.0 — templates compiled to Go code
+- [fasttemplate](https://github.com/valyala/fasttemplate) v1.2.2 — runtime placeholder substitution
+- `text/template` — Go standard library
+- [sailfish](https://github.com/rust-sailfish/sailfish) 0.11.9 — Rust, templates compiled into the binary
 
 Reproduce with:
 
 ```
-go test ./core/ -run ^$ -bench "BenchmarkREADME" -benchmem
+cd compare
+bash run.sh
+cd rust && cargo bench
 ```
+
+### Render to a string (`alos.Replace`, cache on — the default)
+
+Each engine's own string-returning call, given the same values every time.
+alostemplate serves these from its render cache; the other engines have no cache
+and render again.
+
+| Template | alostemplate | quicktemplate | fasttemplate | text/template | sailfish (Rust) |
+|---|---:|---:|---:|---:|---:|
+| Tiny · 21 B · 1 value | **12.8 ns · 78.4 M/s** | 64.2 ns · 15.6 M/s | 72.3 ns · 13.8 M/s | 350 ns · 2.85 M/s | 39.2 ns · 25.5 M/s |
+| Small · 250 B · 4 values | **21.8 ns · 45.9 M/s** | 136 ns · 7.34 M/s | 419 ns · 2.39 M/s | 936 ns · 1.07 M/s | 45.5 ns · 22.0 M/s |
+| Medium · 2.6 KB · 16 values | **61.4 ns · 16.3 M/s** | 634 ns · 1.58 M/s | 2,062 ns · 485 K/s | 4,231 ns · 236 K/s | 133 ns · 7.52 M/s |
+| Large · 35 KB · 64 values | **230 ns · 4.35 M/s** | 6,286 ns · 159 K/s | 8,509 ns · 118 K/s | 36,280 ns · 27.6 K/s | 876 ns · 1.14 M/s |
+| Huge · 148 KB · 8 values | **64.0 ns · 15.6 M/s** | 15,149 ns · 66.0 K/s | 17,208 ns · 58.1 K/s | 57,085 ns · 17.5 K/s | 3,346 ns · 299 K/s |
+| Long values · 33 KB · 8 × 4 KB | **560 ns · 1.78 M/s** | 4,393 ns · 228 K/s | 10,359 ns · 96.5 K/s | 18,408 ns · 54.3 K/s | 671 ns · 1.49 M/s |
+| Many slots · 6.2 KB · 256 values | **809 ns · 1.24 M/s** | 4,582 ns · 218 K/s | 10,393 ns · 96.2 K/s | 54,768 ns · 18.3 K/s | 1,092 ns · 916 K/s |
+
+The same cache hits spread across all 16 threads:
+
+| Template | alostemplate, 16 threads |
+|---|---:|
+| Tiny · 21 B · 1 value | 2.2 ns · 463 M/s |
+| Small · 250 B · 4 values | 3.4 ns · 297 M/s |
+| Medium · 2.6 KB · 16 values | 9.1 ns · 110 M/s |
+| Large · 35 KB · 64 values | 33.0 ns · 30.3 M/s |
+| Huge · 148 KB · 8 values | 8.4 ns · 120 M/s |
+| Long values · 33 KB · 8 × 4 KB | 71.7 ns · 14.0 M/s |
+| Many slots · 6.2 KB · 256 values | 116 ns · 8.61 M/s |
+
+### Render into a reused buffer (`alos.AppendReplace`, no allocations)
+
+Every engine writes into a buffer it is handed, so nothing is allocated and
+nothing is cached. This is a real render on every call.
+
+| Template | alostemplate | quicktemplate | fasttemplate | text/template | sailfish (Rust) |
+|---|---:|---:|---:|---:|---:|
+| Tiny · 21 B · 1 value | 19.3 ns · 51.7 M/s | 35.1 ns · 28.5 M/s | 40.7 ns · 24.6 M/s | 242 ns · 4.13 M/s | **5.9 ns · 169 M/s** |
+| Small · 250 B · 4 values | 32.5 ns · 30.8 M/s | 74.0 ns · 13.5 M/s | 162 ns · 6.16 M/s | 709 ns · 1.41 M/s | **13.1 ns · 76.3 M/s** |
+| Medium · 2.6 KB · 16 values | **93.0 ns · 10.8 M/s** | 240 ns · 4.16 M/s | 720 ns · 1.39 M/s | 2,623 ns · 381 K/s | 98.8 ns · 10.1 M/s |
+| Large · 35 KB · 64 values | 734 ns · 1.36 M/s | 1,140 ns · 877 K/s | 3,216 ns · 311 K/s | 11,410 ns · 87.6 K/s | **661 ns · 1.51 M/s** |
+| Huge · 148 KB · 8 values | 2,391 ns · 418 K/s | **2,322 ns · 431 K/s** | 2,828 ns · 354 K/s | 4,126 ns · 242 K/s | 2,431 ns · 411 K/s |
+| Long values · 33 KB · 8 × 4 KB | **508 ns · 1.97 M/s** | 582 ns · 1.72 M/s | 5,535 ns · 181 K/s | 2,106 ns · 475 K/s | 511 ns · 1.96 M/s |
+| Many slots · 6.2 KB · 256 values | 1,141 ns · 876 K/s | 3,106 ns · 322 K/s | 8,934 ns · 112 K/s | 42,107 ns · 23.7 K/s | **1,054 ns · 949 K/s** |
+
+sailfish is faster on small templates because the template is compiled into the
+program: it never looks a key up by name. From about 2 KB upward every engine is
+limited by how fast memory can be copied, and the fast ones finish within about
+10% of each other.
+
+### Render to a new string with the cache off
+
+`alos.New(alos.WithRenderCache(alos.RenderCacheDisabled))`. Every call allocates
+a fresh string.
+
+| Template | alostemplate | quicktemplate | fasttemplate | text/template | sailfish (Rust) |
+|---|---:|---:|---:|---:|---:|
+| Tiny · 21 B · 1 value | **36.6 ns · 27.3 M/s** | 64.2 ns · 15.6 M/s | 72.3 ns · 13.8 M/s | 350 ns · 2.85 M/s | 39.2 ns · 25.5 M/s |
+| Small · 250 B · 4 values | 83.1 ns · 12.0 M/s | 136 ns · 7.34 M/s | 419 ns · 2.39 M/s | 936 ns · 1.07 M/s | **45.5 ns · 22.0 M/s** |
+| Medium · 2.6 KB · 16 values | 478 ns · 2.09 M/s | 634 ns · 1.58 M/s | 2,062 ns · 485 K/s | 4,231 ns · 236 K/s | **133 ns · 7.52 M/s** |
+| Large · 35 KB · 64 values | 4,237 ns · 236 K/s | 6,286 ns · 159 K/s | 8,509 ns · 118 K/s | 36,280 ns · 27.6 K/s | **876 ns · 1.14 M/s** |
+| Huge · 148 KB · 8 values | 12,226 ns · 81.8 K/s | 15,149 ns · 66.0 K/s | 17,208 ns · 58.1 K/s | 57,085 ns · 17.5 K/s | **3,346 ns · 299 K/s** |
+| Long values · 33 KB · 8 × 4 KB | 3,906 ns · 256 K/s | 4,393 ns · 228 K/s | 10,359 ns · 96.5 K/s | 18,408 ns · 54.3 K/s | **671 ns · 1.49 M/s** |
+| Many slots · 6.2 KB · 256 values | 1,859 ns · 538 K/s | 4,582 ns · 218 K/s | 10,393 ns · 96.2 K/s | 54,768 ns · 18.3 K/s | **1,092 ns · 916 K/s** |
+
+Here the cost is Go's allocator, not the template engine: allocating the 2.6 KB
+result alone takes about 400 ns, which is longer than sailfish's whole render.
+Use the cache or `AppendReplace` when this path matters.
+
+### `[]string` pairs vs `map[string]string`
+
+The tables above pass `[]string` pairs. A map costs one Go map lookup per
+placeholder on top:
+
+| Template | pairs, cache hit | map, cache hit | pairs, buffer | map, buffer |
+|---|---:|---:|---:|---:|
+| Tiny · 21 B · 1 value | 12.8 ns · 78.4 M/s | 23.1 ns · 43.4 M/s | 19.3 ns · 51.7 M/s | 25.1 ns · 39.9 M/s |
+| Small · 250 B · 4 values | 21.8 ns · 45.9 M/s | 52.4 ns · 19.1 M/s | 32.5 ns · 30.8 M/s | 64.8 ns · 15.4 M/s |
+| Medium · 2.6 KB · 16 values | 61.4 ns · 16.3 M/s | 185 ns · 5.40 M/s | 93.0 ns · 10.8 M/s | 215 ns · 4.66 M/s |
+| Large · 35 KB · 64 values | 230 ns · 4.35 M/s | 755 ns · 1.32 M/s | 734 ns · 1.36 M/s | 1,257 ns · 796 K/s |
+| Huge · 148 KB · 8 values | 64.0 ns · 15.6 M/s | 132 ns · 7.58 M/s | 2,391 ns · 418 K/s | 2,273 ns · 440 K/s |
+| Long values · 33 KB · 8 × 4 KB | 560 ns · 1.78 M/s | 624 ns · 1.60 M/s | 508 ns · 1.97 M/s | 587 ns · 1.70 M/s |
+| Many slots · 6.2 KB · 256 values | 809 ns · 1.24 M/s | 3,014 ns · 332 K/s | 1,141 ns · 876 K/s | 3,330 ns · 300 K/s |
 
 ### Cache hits do not depend on page size
 
-A hit is a hash of the values plus one map lookup, so the page can be any size.
+A hit hashes the values and reads one cache slot, so the page can be any size.
 One placeholder, cache enabled:
 
-| Page size | Cache hit | Cache miss |
+| Page size | Cache hit | Full render (cache off) |
 |---|---:|---:|
-| 1 KB | `16.4 ns` · 0 allocs | `183 ns` · 1 alloc |
-| 8 KB | `16.3 ns` · 0 allocs | `989 ns` · 1 alloc |
-| 32 KB | `16.4 ns` · 0 allocs | `4.14 µs` · 1 alloc |
-| 128 KB | `16.6 ns` · 0 allocs | `10.2 µs` · 1 alloc |
-
-A miss renders the page and stores it; every later call within the TTL is a hit.
+| 1 KB | 7.6 ns · 132 M/s | 208 ns · 4.80 M/s |
+| 8 KB | 7.7 ns · 130 M/s | 895 ns · 1.12 M/s |
+| 32 KB | 7.7 ns · 130 M/s | 3,852 ns · 260 K/s |
+| 128 KB | 7.7 ns · 130 M/s | 13,825 ns · 72.3 K/s |
 
 ### Hit cost tracks how many values you pass
 
-Hashing the values is the only per-call work, so cost scales with value count,
-not page size. Small page, varying placeholders:
+Small page, varying placeholder count, cache hits:
 
 | Values | `[]string` pairs | `map[string]string` |
 |---|---:|---:|
-| 0 | `12.2 ns` | `15.8 ns` |
-| 1 | `17.6 ns` | `45.4 ns` |
-| 4 | `34.6 ns` | `73.4 ns` |
-| 8 | `56.1 ns` | `93.9 ns` |
-| 16 | `105 ns` | `231 ns` |
-| 64 | `390 ns` | `862 ns` |
+| 0 | 2.2 ns · 455 M/s | 2.2 ns · 455 M/s |
+| 1 | 9.1 ns · 110 M/s | 19.2 ns · 52.1 M/s |
+| 4 | 18.8 ns · 53.2 M/s | 49.8 ns · 20.1 M/s |
+| 8 | 32.0 ns · 31.2 M/s | 93.6 ns · 10.7 M/s |
+| 16 | 57.9 ns · 17.3 M/s | 180 ns · 5.57 M/s |
+| 64 | 220 ns · 4.55 M/s | 700 ns · 1.43 M/s |
 
-Passing `[]string` pairs is consistently faster than a `map[string]string`,
-because the map path additionally pays Go's map iteration on every call.
-
-All of the above are **0 allocations**.
+A template with no placeholders is returned as-is without copying. All of the
+above are **0 allocations**.
 
 ### Loading
 
 | Operation | Time |
 |---|---:|
-| `Load` — cached single file | `23.4 µs` |
-| `Load` — cached directory bundle | `91.6 µs` |
-| `Named` lookup on a bundle | `13.7 ns` |
+| `Load` — cached single file | `92 µs` |
+| `Load` — cached directory bundle | `204 µs` |
+| `Named` lookup on a bundle | `13.4 ns` |
 
 `Load` re-stats the file on every call to detect on-disk changes, and that syscall is most of its cost on Windows. Call `Load` once at startup and hold the returned `*Template`; do not call it per request.
 
 ### Notes on reading these numbers
 
-- Cache hits allocate nothing and are independent of page size.
-- A cache miss allocates exactly once: the rendered page itself.
-- Benchmarks that allocate vary by ±20% run to run on this machine because of GC timing. Zero-allocation rows are stable to within a few percent.
+- Renders per second is `1 / time` on one core. It is not a web-server throughput figure.
+- Cache hits and `AppendReplace` allocate nothing. A cache miss allocates the page and one small cache entry.
+- Results that allocate move by 20% or more from run to run because of GC timing, and by 2–3× depending on what else the process has allocated. Zero-allocation rows are stable to within about 10%.
 
 ## Examples
 
@@ -1101,7 +1210,7 @@ func main() {
 
 ## Tests
 
-136 test functions across `core/` and the root package, covering every exported and unexported function:
+170 test functions across `core/` and the root package, covering every exported and unexported function:
 
 - Single file loading and rendering
 - Directory bundle loading with explicit includes
@@ -1126,7 +1235,4 @@ Benchmark alternatives used to select the current implementation live in `core/a
 
 `Replace` and `ReplaceMap` are safe to call concurrently on the same `*Template`. `Load` is safe to call concurrently on the same `*Engine`.
 
-> **Known issue — auto-refresh is not safe alongside concurrent rendering.**
-> `Reload` updates templates in place, and the background goroutine started by `WithAutoRefresh` / `SetAutoRefresh` writes template state while `Replace` reads it, with no synchronisation. The race detector reports this. `Stop()` does not establish ordering either, so there is no way for a caller to safely observe a refreshed template.
->
-> Until this is fixed, do not enable auto-refresh in a process that renders concurrently. Prefer calling `Reload()` explicitly at a point where you control access, or reload into a fresh `Engine` and swap the pointer yourself. This is tracked by `TestAutoRefreshConcurrentRenderIsRacy` in `core/`.
+`Reload`, `Template.Reload` and the auto-refresh goroutine are also safe to run while other goroutines render. Each reload compiles a new template and publishes it through an atomic pointer, and reloads on one `Engine` run one at a time. This is covered under the race detector by `TestReloadWhileRenderingIsRaceFreeAndNeverMixesVersions` and `TestAutoRefreshConcurrentRenderIsRaceFree` in `core/`.

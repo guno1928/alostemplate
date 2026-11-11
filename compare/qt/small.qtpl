@@ -1,0 +1,1 @@
+{% func Small(v []string) %}<div class="card"><h2>Account overview</{%s= v[0] %}ass="card"><h2>Account overview</h2><p>Y{%s= v[1] %}rd"><h2>Account overview</h2><p>Your bal{%s= v[2] %}>Account overview</h2><p>Your balance an{%s= v[3] %}t overview</h2><p>Your balance and recen{% endfunc %}

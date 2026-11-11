@@ -1,7 +1,8 @@
 package alos
 
 import (
-	"fmt"
+	"errors"
+	"reflect"
 	"time"
 
 	corepkg "github.com/guno1928/alostemplate/core"
@@ -148,7 +149,7 @@ func RenderCacheTTL() time.Duration { return defaultEngine.RenderCacheTTL() }
 // an unsupported type.
 func Replace(tpl *Template, values any) (string, error) {
 	if tpl == nil {
-		return "", fmt.Errorf("template is nil")
+		return "", errNilTemplate
 	}
 	switch typed := values.(type) {
 	case nil:
@@ -156,13 +157,47 @@ func Replace(tpl *Template, values any) (string, error) {
 	case string:
 		return corepkg.Replace(tpl, []string{typed}), nil
 	case []string:
-		if len(typed) > 1 && len(typed)%2 != 0 {
-			return "", fmt.Errorf("replacement pairs must have an even number of items or a single value shorthand")
+		if !validPairs(typed) {
+			return "", errOddPairs
 		}
 		return corepkg.Replace(tpl, typed), nil
 	case map[string]string:
 		return corepkg.ReplaceMap(tpl, typed), nil
 	default:
-		return "", fmt.Errorf("unsupported replacement input %T: use string, []string, or map[string]string", values)
+		return "", unsupportedInputError(values)
 	}
+}
+
+func AppendReplace(dst []byte, tpl *Template, values any) ([]byte, error) {
+	if tpl == nil {
+		return dst, errNilTemplate
+	}
+	switch typed := values.(type) {
+	case nil:
+		return corepkg.AppendMap(dst, tpl, nil), nil
+	case string:
+		return corepkg.AppendPairs(dst, tpl, []string{typed}), nil
+	case []string:
+		if !validPairs(typed) {
+			return dst, errOddPairs
+		}
+		return corepkg.AppendPairs(dst, tpl, typed), nil
+	case map[string]string:
+		return corepkg.AppendMap(dst, tpl, typed), nil
+	default:
+		return dst, unsupportedInputError(values)
+	}
+}
+
+var (
+	errNilTemplate = errors.New("template is nil")
+	errOddPairs    = errors.New("replacement pairs must have an even number of items or a single value shorthand")
+)
+
+func validPairs(pairs []string) bool {
+	return len(pairs) <= 1 || len(pairs)%2 == 0
+}
+
+func unsupportedInputError(values any) error {
+	return errors.New("unsupported replacement input " + reflect.TypeOf(values).String() + ": use string, []string, or map[string]string")
 }

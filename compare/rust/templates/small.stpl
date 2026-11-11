@@ -1,0 +1,1 @@
+<div class="card"><h2>Account overview</<%- self.v[0] %>ass="card"><h2>Account overview</h2><p>Y<%- self.v[1] %>rd"><h2>Account overview</h2><p>Your bal<%- self.v[2] %>>Account overview</h2><p>Your balance an<%- self.v[3] %>t overview</h2><p>Your balance and recen

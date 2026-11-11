@@ -118,16 +118,7 @@ func TestAutoRefreshLoopReloads(t *testing.T) {
 	}
 }
 
-// TestAutoRefreshConcurrentRenderIsRacy documents a pre-existing data race that
-// predates this test suite: the background refresh goroutine mutates Template
-// fields through applyTemplateReload while Replace reads them, with no
-// synchronisation on Template. It reproduces on the original engine.go as well.
-// Fixing it requires publishing reload results through an atomic snapshot rather
-// than mutating the Template in place, which is a behavioural change to the
-// reload path and is deliberately out of scope for the performance work.
-func TestAutoRefreshConcurrentRenderIsRacy(t *testing.T) {
-	t.Skip("known pre-existing data race: WithAutoRefresh mutates Template in place while Replace reads it")
-
+func TestAutoRefreshConcurrentRenderIsRaceFree(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "a.alos", "one {{v}} tail")
 	e := newTestEngine(t, WithAutoRefresh(time.Millisecond))
@@ -771,11 +762,12 @@ func TestApplyTemplateReloadClearsBundleFields(t *testing.T) {
 	}
 	src := &Template{literals: []string{"a"}, staticLen: 1}
 	applyTemplateReload(dst, src)
-	if dst.named != nil || dst.names != nil || dst.defaultTpl != nil {
+	got := dst.live()
+	if got.named != nil || got.names != nil || got.defaultTpl != nil {
 		t.Fatal("bundle fields should be cleared when src is a single template")
 	}
-	if dst.staticLen != 1 {
-		t.Fatalf("staticLen = %d", dst.staticLen)
+	if got.staticLen != 1 {
+		t.Fatalf("staticLen = %d", got.staticLen)
 	}
 }
 
@@ -788,10 +780,11 @@ func TestApplyTemplateReloadCreatesMissingChildren(t *testing.T) {
 	}
 	dst := &Template{}
 	applyTemplateReload(dst, src)
-	if dst.named["c"] == nil {
+	got := dst.live()
+	if got.named["c"] == nil {
 		t.Fatal("child not created")
 	}
-	if dst.defaultTpl != dst.named["c"] {
+	if got.defaultTpl != got.named["c"] {
 		t.Fatal("defaultTpl not mapped to new child")
 	}
 }
@@ -805,7 +798,7 @@ func TestApplyTemplateReloadDefaultTplUnmappable(t *testing.T) {
 	}
 	dst := &Template{}
 	applyTemplateReload(dst, src)
-	if dst.defaultTpl != nil {
+	if dst.live().defaultTpl != nil {
 		t.Fatal("unmappable defaultTpl should become nil")
 	}
 }
