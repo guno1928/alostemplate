@@ -929,87 +929,7 @@ func buildKeyWords(keys []string) []uint64 {
 	return words
 }
 
-const stringHeaderSize = unsafe.Sizeof("")
-
-func (tpl *Template) gatherLinear(dst []byte, total int, values unsafe.Pointer, valueStride uintptr) []byte {
-	if total == 0 {
-		return dst[:0]
-	}
-	dst = sizedOutput(dst, total)
-	base := unsafe.Pointer(unsafe.SliceData(dst))
-	literals := unsafe.Pointer(unsafe.SliceData(tpl.literals))
-	segments := len(tpl.literals)*2 - 1
-	var written uintptr
-	if prefersRuntimeMemmove(total, segments) {
-		written = gatherStreamsGo(base, uintptr(total), literals, stringHeaderSize, values, valueStride, segments)
-	} else {
-		written = gatherStreamsAsm(base, uintptr(total), literals, stringHeaderSize, values, valueStride, segments)
-	}
-	if written != uintptr(total) {
-		clear(dst[written:])
-	}
-	return dst
-}
-
-func (tpl *Template) renderLinearPairs(dst []byte, pairs []string) ([]byte, bool) {
-	keys := tpl.keys
-	n := len(keys)
-	words := tpl.keyWords
-	if n == 0 || len(words) != n || len(tpl.literals) != n+1 || len(pairs) != 2*n {
-		return dst, false
-	}
-	total := tpl.staticLen
-	for i := 0; i < n; i++ {
-		key := keys[i]
-		candidate := pairs[2*i]
-		length := len(candidate)
-		if length != len(key) {
-			return dst, false
-		}
-		if length > shortKeyLimit {
-			if candidate != key {
-				return dst, false
-			}
-		} else if packShortKey(unsafe.Pointer(unsafe.StringData(candidate)), length) != words[i] {
-			return dst, false
-		}
-		total += len(pairs[2*i+1])
-	}
-	return tpl.gatherLinear(dst, total, unsafe.Pointer(&pairs[1]), 2*stringHeaderSize), true
-}
-
-func (tpl *Template) renderLinearMap(dst []byte, values map[string]string, resolved []string) []byte {
-	keys := tpl.keys
-	n := len(keys)
-	slots := tpl.slots
-	if n == 0 || len(slots) != n || len(tpl.literals) != n+1 || len(resolved) != n {
-		return dst[:0]
-	}
-	total := tpl.staticLen
-	for i, key := range keys {
-		value, ok := values[key]
-		if !ok {
-			value = slots[i].placeholder
-		}
-		total += len(value)
-		resolved[i] = value
-	}
-	return tpl.gatherLinear(dst, total, unsafe.Pointer(&resolved[0]), stringHeaderSize)
-}
-
-func renderPairsInto(tpl *Template, dst []byte, pairs []string) []byte {
-	if len(tpl.slots) == 0 {
-		return tpl.renderStatic(dst)
-	}
-	if tpl.linear {
-		if out, ok := tpl.renderLinearPairs(dst, pairs); ok {
-			return out
-		}
-	}
-	if tpl.single.enabled {
-		return tpl.replaceSingle(dst, pairs)
-	}
-
+func (tpl *Template) renderPairsGeneric(dst []byte, pairs []string) []byte {
 	nKeys := len(tpl.keys)
 	nParts := 2*len(tpl.slots) + 1
 	if nKeys <= inlineKeyLimit && nParts <= inlinePartLimit {
@@ -1031,14 +951,6 @@ func renderPairsInto(tpl *Template, dst []byte, pairs []string) []byte {
 	dst = gatherParts(dst, parts, total)
 	releaseRenderScratch(pooled, nKeys)
 	return dst
-}
-
-func (tpl *Template) cachedRender(key uint64, now int64) (string, bool) {
-	cache := tpl.renderCache.Load()
-	if cache == nil {
-		return "", false
-	}
-	return cache.load(key, now)
 }
 
 func (tpl *Template) storeRender(key uint64, rendered string, now int64, ttl time.Duration) {
@@ -1085,14 +997,16 @@ func ReplaceMap(tpl *Template, values map[string]string) string {
 	}
 	ttl := tpl.renderCacheTTL()
 	if ttl <= 0 {
-		return bytesToString(renderMapInto(tpl, nil, values))
+		return bytesToString(appendMap(tpl, nil, values))
 	}
 	key := tpl.hashMapValues(values)
 	now := turbo.Now()
-	if hit, ok := tpl.cachedRender(key, now); ok {
-		return hit
+	if cache := tpl.renderCache.Load(); cache != nil {
+		if hit, ok := cache.load(key, now); ok {
+			return hit
+		}
 	}
-	rendered := bytesToString(renderMapInto(tpl, nil, values))
+	rendered := bytesToString(appendMap(tpl, nil, values))
 	tpl.storeRender(key, rendered, now, ttl)
 	return rendered
 }
@@ -1107,16 +1021,91 @@ func Replace(tpl *Template, pairs []string) string {
 	}
 	ttl := tpl.renderCacheTTL()
 	if ttl <= 0 {
-		return bytesToString(renderPairsInto(tpl, nil, pairs))
+		return bytesToString(appendPairs(tpl, nil, pairs))
 	}
 	key := hashStrings(pairsHashSeed, pairs)
 	now := turbo.Now()
-	if hit, ok := tpl.cachedRender(key, now); ok {
-		return hit
+	if cache := tpl.renderCache.Load(); cache != nil {
+		if hit, ok := cache.load(key, now); ok {
+			return hit
+		}
 	}
-	rendered := bytesToString(renderPairsInto(tpl, nil, pairs))
+	rendered := bytesToString(appendPairs(tpl, nil, pairs))
 	tpl.storeRender(key, rendered, now, ttl)
 	return rendered
+}
+
+func ReplaceValues(tpl *Template, values []string) string {
+	if tpl == nil {
+		return ""
+	}
+	tpl = tpl.renderBody()
+	if len(tpl.slots) == 0 {
+		return tpl.staticOutput()
+	}
+	ttl := tpl.renderCacheTTL()
+	if ttl <= 0 {
+		return bytesToString(appendValues(tpl, nil, values))
+	}
+	key := hashStrings(valuesHashSeed, values)
+	now := turbo.Now()
+	if cache := tpl.renderCache.Load(); cache != nil {
+		if hit, ok := cache.load(key, now); ok {
+			return hit
+		}
+	}
+	rendered := bytesToString(appendValues(tpl, nil, values))
+	tpl.storeRender(key, rendered, now, ttl)
+	return rendered
+}
+
+func AppendPairs(dst []byte, tpl *Template, pairs []string) []byte {
+	if tpl == nil {
+		return dst
+	}
+	tpl = tpl.renderBody()
+	if tpl.linear && tpl.pairsFollowKeyOrder(pairs) {
+		stream := unsafe.Pointer(unsafe.SliceData(pairs[1:]))
+		end := tpl.renderFitting(dst, stream, 2*stringHeaderSize)
+		if end != renderIncomplete {
+			return dst[:end]
+		}
+		return tpl.appendGrowing(dst, stream, 2*stringHeaderSize)
+	}
+	return appendPairs(tpl, dst, pairs)
+}
+
+func AppendMap(dst []byte, tpl *Template, values map[string]string) []byte {
+	if tpl == nil {
+		return dst
+	}
+	return appendMap(tpl.renderBody(), dst, values)
+}
+
+func AppendValues(dst []byte, tpl *Template, values []string) []byte {
+	if tpl == nil {
+		return dst
+	}
+	tpl = tpl.renderBody()
+	if tpl.linear && len(values) >= len(tpl.keys) {
+		stream := unsafe.Pointer(unsafe.SliceData(values))
+		end := tpl.renderFitting(dst, stream, stringHeaderSize)
+		if end != renderIncomplete {
+			return dst[:end]
+		}
+		return tpl.appendGrowing(dst, stream, stringHeaderSize)
+	}
+	return appendValues(tpl, dst, values)
+}
+
+func (tpl *Template) Keys() []string {
+	if tpl == nil {
+		return nil
+	}
+	keys := tpl.renderBody().keys
+	out := make([]string, len(keys))
+	copy(out, keys)
+	return out
 }
 
 func (tpl *Template) staticOutput() string {
@@ -1133,80 +1122,11 @@ func appendRendered(dst []byte, rendered []byte) []byte {
 	return append(dst, rendered...)
 }
 
-func AppendPairs(dst []byte, tpl *Template, pairs []string) []byte {
-	if tpl == nil {
-		return dst
-	}
-	return appendRendered(dst, renderPairsInto(tpl.renderBody(), dst[len(dst):], pairs))
-}
-
-func AppendMap(dst []byte, tpl *Template, values map[string]string) []byte {
-	if tpl == nil {
-		return dst
-	}
-	return appendRendered(dst, renderMapInto(tpl.renderBody(), dst[len(dst):], values))
-}
-
 func bytesToString(b []byte) string {
 	if len(b) == 0 {
 		return ""
 	}
 	return unsafe.String(unsafe.SliceData(b), len(b))
-}
-
-func renderMapInto(tpl *Template, dst []byte, values map[string]string) []byte {
-	if tpl.single.enabled {
-		return tpl.replaceSingleMap(dst, values)
-	}
-	if len(tpl.slots) == 0 {
-		return tpl.renderStatic(dst)
-	}
-
-	nKeys := len(tpl.keys)
-	nParts := 2*len(tpl.slots) + 1
-	if tpl.linear {
-		if nKeys <= inlineKeyLimit {
-			var inlineResolved [inlineKeyLimit]string
-			return tpl.renderLinearMap(dst, values, inlineResolved[:nKeys])
-		}
-		pooled := acquireRenderScratch(nKeys, 0)
-		dst = tpl.renderLinearMap(dst, values, pooled.resolved[:nKeys])
-		releaseRenderScratch(pooled, nKeys)
-		return dst
-	}
-	if nKeys <= inlineKeyLimit && nParts <= inlinePartLimit {
-		var inlineResolved [inlineKeyLimit]string
-		var inlineFound [inlineKeyLimit]bool
-		var inlineParts [inlinePartLimit]string
-		resolved := inlineResolved[:nKeys]
-		found := inlineFound[:nKeys]
-		resolveMapValues(tpl.keys, values, resolved, found)
-		parts, total := tpl.emitParts(inlineParts[:0], resolved, found)
-		return gatherParts(dst, parts, total)
-	}
-
-	pooled := acquireRenderScratch(nKeys, nParts)
-	resolved := pooled.resolved[:nKeys]
-	found := pooled.found[:nKeys]
-	resolveMapValues(tpl.keys, values, resolved, found)
-	parts, total := tpl.emitParts(pooled.parts[:0], resolved, found)
-	dst = gatherParts(dst, parts, total)
-	releaseRenderScratch(pooled, nKeys)
-	return dst
-}
-
-// resolveMapValues looks up each unique template key once, so a key repeated
-// across many slots costs a single map probe.
-func resolveMapValues(keys []string, values map[string]string, resolved []string, found []bool) {
-	if len(values) == 0 {
-		return
-	}
-	for i, key := range keys {
-		if value, ok := values[key]; ok {
-			resolved[i] = value
-			found[i] = true
-		}
-	}
 }
 
 func (tpl *Template) replaceSingle(dst []byte, pairs []string) []byte {
@@ -1216,18 +1136,15 @@ func (tpl *Template) replaceSingle(dst []byte, pairs []string) []byte {
 	} else if value, ok := findReplacement(pairs, tpl.single.key); ok {
 		replacement = value
 	}
-	return tpl.gatherLinear(dst, tpl.single.staticLen+len(replacement), unsafe.Pointer(&replacement), stringHeaderSize)
+	return tpl.appendLinear(dst[:0], unsafe.Pointer(&replacement), stringHeaderSize)
 }
 
 func (tpl *Template) replaceSingleMap(dst []byte, values map[string]string) []byte {
-	replacement, ok := values[tpl.single.key]
-	if !ok {
-		replacement = tpl.single.placeholder
-	}
-	return tpl.gatherLinear(dst, tpl.single.staticLen+len(replacement), unsafe.Pointer(&replacement), stringHeaderSize)
+	return appendMap(tpl, dst[:0], values)
 }
 
 func (e *Engine) compileSource(src string) (*Template, error) {
+	src = padSource(src)
 	leftDelim := e.leftDelim
 	rightDelim := e.rightDelim
 	leftLen := len(leftDelim)

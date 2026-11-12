@@ -43,68 +43,283 @@ func assertCanariesIntact(t *testing.T, whole []byte, size int) {
 	}
 }
 
-func TestGatherStreamsCopiesEveryLengthClassExactly(t *testing.T) {
+type linearKernel struct {
+	name   string
+	render func(tpl *Template, base unsafe.Pointer, pos uintptr, end uintptr, values unsafe.Pointer, stride uintptr) uintptr
+}
+
+var linearKernels = []linearKernel{
+	{"platform", (*Template).renderLinear},
+	{"portable", (*Template).writeLinear},
+}
+
+type kernelCase struct {
+	tpl    *Template
+	values []string
+	pairs  []string
+	want   string
+}
+
+func buildKernelCase(t *testing.T, e *Engine, literalLen int, valueLen int, slots int) kernelCase {
+	t.Helper()
+	var source, want strings.Builder
+	c := kernelCase{}
+	for i := 0; i <= slots; i++ {
+		literal := patternString(literalLen, i)
+		source.WriteString(literal)
+		want.WriteString(literal)
+		if i < slots {
+			key := "k" + strconv.Itoa(i)
+			value := patternString(valueLen, 100+i)
+			source.WriteString("{{" + key + "}}")
+			want.WriteString(value)
+			c.values = append(c.values, value)
+			c.pairs = append(c.pairs, key, value)
+		}
+	}
+	c.tpl = mustCompile(t, e, source.String())
+	c.want = want.String()
+	return c
+}
+
+func TestLinearKernelCopiesEveryLengthClassExactly(t *testing.T) {
+	const (
+		slots  = 3
+		prefix = 5
+		spare  = 48
+	)
 	forEachGatherMode(t, func(t *testing.T) {
+		e := newTestEngine(t)
 		for _, literalLen := range copyClassLengths {
 			for _, valueLen := range copyClassLengths {
-				const slots = 3
-				literals := make([]string, slots+1)
-				values := make([]string, slots)
-				pairs := make([]string, 0, slots*2)
-				var want strings.Builder
-				for i := 0; i <= slots; i++ {
-					literals[i] = patternString(literalLen, i)
-					want.WriteString(literals[i])
-					if i < slots {
-						values[i] = patternString(valueLen, 100+i)
-						pairs = append(pairs, "key", values[i])
-						want.WriteString(values[i])
-					}
-				}
-				total := want.Len()
-				for _, layout := range []struct {
+				c := buildKernelCase(t, e, literalLen, valueLen, slots)
+				total := len(c.want)
+				streams := []struct {
 					name   string
 					start  unsafe.Pointer
 					stride uintptr
 				}{
-					{"contiguous", unsafe.Pointer(unsafe.SliceData(values)), stringHeaderSize},
-					{"pairs", unsafe.Pointer(&pairs[1]), 2 * stringHeaderSize},
-				} {
-					whole, body := guardedBuffer(total)
-					base := unsafe.Pointer(unsafe.SliceData(whole[canaryLen:]))
-					if written := int(gatherStreamsAsm(base, uintptr(total), unsafe.Pointer(unsafe.SliceData(literals)), stringHeaderSize, layout.start, layout.stride, 2*slots+1)); written != total {
-						t.Fatalf("literal %d value %d %s: wrote %d bytes want %d", literalLen, valueLen, layout.name, written, total)
-					}
-					if string(body) != want.String() {
-						t.Fatalf("literal %d value %d %s: output differs", literalLen, valueLen, layout.name)
-					}
-					assertCanariesIntact(t, whole, total)
+					{"values", unsafe.Pointer(unsafe.SliceData(c.values)), stringHeaderSize},
+					{"pairs", unsafe.Pointer(&c.pairs[1]), 2 * stringHeaderSize},
 				}
-				runtime.KeepAlive(pairs)
+				for _, kernel := range linearKernels {
+					for _, stream := range streams {
+						whole, body := guardedBuffer(prefix + total + spare)
+						base := unsafe.Pointer(unsafe.SliceData(body))
+						end := kernel.render(c.tpl, base, prefix, uintptr(prefix+total), stream.start, stream.stride)
+						label := kernel.name + "/" + stream.name
+						if end != uintptr(prefix+total) {
+							t.Fatalf("literal %d value %d %s: end %d want %d", literalLen, valueLen, label, end, prefix+total)
+						}
+						if string(body[prefix:prefix+total]) != c.want {
+							t.Fatalf("literal %d value %d %s: output differs", literalLen, valueLen, label)
+						}
+						for i, b := range body[:prefix] {
+							if b != canaryByte {
+								t.Fatalf("literal %d value %d %s: byte %d before the output was overwritten", literalLen, valueLen, label, i)
+							}
+						}
+						for i, b := range body[prefix+total:] {
+							if b != canaryByte {
+								t.Fatalf("literal %d value %d %s: byte %d after the output was overwritten", literalLen, valueLen, label, i)
+							}
+						}
+						assertCanariesIntact(t, whole, prefix+total+spare)
+					}
+				}
+				runtime.KeepAlive(c)
 			}
 		}
 	})
 }
 
-func TestGatherStreamsNeverWritesPastTheLimit(t *testing.T) {
+func TestLinearKernelStopsWhenAValueOutgrowsTheReservedSpace(t *testing.T) {
+	const slots = 3
 	forEachGatherMode(t, func(t *testing.T) {
-		for _, segmentLen := range copyClassLengths {
-			if segmentLen == 0 {
-				continue
-			}
-			literals := []string{patternString(segmentLen, 1), patternString(segmentLen, 2)}
-			values := []string{patternString(segmentLen, 3)}
-			for _, room := range []int{0, 1, segmentLen - 1, segmentLen, 2*segmentLen - 1, 2 * segmentLen, 3*segmentLen - 1} {
-				whole, _ := guardedBuffer(room)
-				base := unsafe.Pointer(unsafe.SliceData(whole[canaryLen:]))
-				written := int(gatherStreamsAsm(base, uintptr(room), unsafe.Pointer(unsafe.SliceData(literals)), stringHeaderSize, unsafe.Pointer(unsafe.SliceData(values)), stringHeaderSize, 3))
-				if want := room / segmentLen * segmentLen; written != want {
-					t.Fatalf("segment %d room %d: wrote %d bytes want %d", segmentLen, room, written, want)
+		e := newTestEngine(t)
+		for _, literalLen := range copyClassLengths {
+			for _, valueLen := range copyClassLengths {
+				if valueLen == 0 {
+					continue
 				}
-				assertCanariesIntact(t, whole, room)
+				c := buildKernelCase(t, e, literalLen, valueLen, slots)
+				total := len(c.want)
+				for _, kernel := range linearKernels {
+					for _, shortfall := range []int{1, valueLen, total} {
+						reserved := total - shortfall
+						whole, body := guardedBuffer(reserved)
+						base := unsafe.Pointer(unsafe.SliceData(whole[canaryLen:]))
+						end := kernel.render(c.tpl, base, 0, uintptr(reserved), unsafe.Pointer(unsafe.SliceData(c.values)), stringHeaderSize)
+						if end != renderIncomplete {
+							t.Fatalf("literal %d value %d %s short by %d: end %d, want an incomplete render", literalLen, valueLen, kernel.name, shortfall, end)
+						}
+						assertCanariesIntact(t, whole, reserved)
+						runtime.KeepAlive(body)
+					}
+				}
+				runtime.KeepAlive(c)
 			}
 		}
 	})
+}
+
+func TestLinearKernelReportsAnIncompleteRenderWhenValuesShrinkAfterSizing(t *testing.T) {
+	const slots = 3
+	forEachGatherMode(t, func(t *testing.T) {
+		e := newTestEngine(t)
+		for _, literalLen := range copyClassLengths {
+			for _, valueLen := range copyClassLengths {
+				c := buildKernelCase(t, e, literalLen, valueLen, slots)
+				total := len(c.want)
+				const extra = 40
+				for _, kernel := range linearKernels {
+					whole, body := guardedBuffer(total + extra)
+					base := unsafe.Pointer(unsafe.SliceData(whole[canaryLen:]))
+					end := kernel.render(c.tpl, base, 0, uintptr(total+extra), unsafe.Pointer(unsafe.SliceData(c.values)), stringHeaderSize)
+					if end != renderIncomplete || string(body[:total]) != c.want {
+						t.Fatalf("literal %d value %d %s: end %d, want an incomplete render of the full text", literalLen, valueLen, kernel.name, end)
+					}
+					assertCanariesIntact(t, whole, total+extra)
+				}
+				runtime.KeepAlive(c)
+			}
+		}
+	})
+}
+
+type fittingKernel struct {
+	name   string
+	render func(tpl *Template, dst []byte, values unsafe.Pointer, stride uintptr) uintptr
+}
+
+var fittingKernels = []fittingKernel{
+	{"platform", (*Template).renderFitting},
+	{"portable", (*Template).writeFitting},
+}
+
+func TestFittingKernelRendersWheneverTheOutputFits(t *testing.T) {
+	const (
+		slots  = 3
+		prefix = 5
+	)
+	forEachGatherMode(t, func(t *testing.T) {
+		e := newTestEngine(t)
+		for _, literalLen := range copyClassLengths {
+			for _, valueLen := range copyClassLengths {
+				c := buildKernelCase(t, e, literalLen, valueLen, slots)
+				total := len(c.want)
+				streams := []struct {
+					name   string
+					start  unsafe.Pointer
+					stride uintptr
+				}{
+					{"values", unsafe.Pointer(unsafe.SliceData(c.values)), stringHeaderSize},
+					{"pairs", unsafe.Pointer(&c.pairs[1]), 2 * stringHeaderSize},
+				}
+				for _, kernel := range fittingKernels {
+					for _, stream := range streams {
+						for _, spare := range []int{0, 1, 16, 48} {
+							whole, body := guardedBuffer(prefix + total + spare)
+							end := kernel.render(c.tpl, body[:prefix:len(body)], stream.start, stream.stride)
+							label := kernel.name + "/" + stream.name
+							if end != uintptr(prefix+total) {
+								t.Fatalf("literal %d value %d spare %d %s: end %d want %d", literalLen, valueLen, spare, label, end, prefix+total)
+							}
+							if string(body[prefix:prefix+total]) != c.want {
+								t.Fatalf("literal %d value %d spare %d %s: output differs", literalLen, valueLen, spare, label)
+							}
+							if bytes.Count(body[:prefix], []byte{canaryByte}) != prefix || bytes.Count(body[prefix+total:], []byte{canaryByte}) != spare {
+								t.Fatalf("literal %d value %d spare %d %s: bytes outside the output were overwritten", literalLen, valueLen, spare, label)
+							}
+							assertCanariesIntact(t, whole, len(body))
+						}
+					}
+				}
+				runtime.KeepAlive(c)
+			}
+		}
+	})
+}
+
+func TestFittingKernelWritesNothingWhenTheOutputDoesNotFit(t *testing.T) {
+	const (
+		slots  = 3
+		prefix = 5
+	)
+	forEachGatherMode(t, func(t *testing.T) {
+		e := newTestEngine(t)
+		for _, literalLen := range copyClassLengths {
+			for _, valueLen := range copyClassLengths {
+				c := buildKernelCase(t, e, literalLen, valueLen, slots)
+				total := len(c.want)
+				if total == 0 {
+					continue
+				}
+				for _, kernel := range fittingKernels {
+					for _, shortfall := range []int{1, total/2 + 1, total} {
+						whole, body := guardedBuffer(prefix + total - shortfall)
+						end := kernel.render(c.tpl, body[:prefix:len(body)], unsafe.Pointer(unsafe.SliceData(c.values)), stringHeaderSize)
+						if end != renderIncomplete {
+							t.Fatalf("literal %d value %d %s short by %d: end %d, want an incomplete render", literalLen, valueLen, kernel.name, shortfall, end)
+						}
+						if bytes.Count(whole, []byte{canaryByte}) != len(whole) {
+							t.Fatalf("literal %d value %d %s short by %d: the buffer was written to", literalLen, valueLen, kernel.name, shortfall)
+						}
+					}
+				}
+				runtime.KeepAlive(c)
+			}
+		}
+	})
+}
+
+func TestKernelsWriteNothingForATemplateWithoutABody(t *testing.T) {
+	const position = 7
+	empty := &Template{}
+	whole, body := guardedBuffer(64)
+	base := unsafe.Pointer(unsafe.SliceData(body))
+	for _, kernel := range linearKernels {
+		if end := kernel.render(empty, base, position, uintptr(len(body)), nil, stringHeaderSize); end != position {
+			t.Fatalf("%s: end %d want %d", kernel.name, end, position)
+		}
+	}
+	for _, kernel := range fittingKernels {
+		if end := kernel.render(empty, body[:position:len(body)], nil, stringHeaderSize); end != position {
+			t.Fatalf("fitting %s: end %d want %d", kernel.name, end, position)
+		}
+	}
+	if bytes.Count(whole, []byte{canaryByte}) != len(whole) {
+		t.Fatal("a template without a body wrote to the buffer")
+	}
+	if got := AppendValues([]byte("keep"), empty, []string{"x"}); string(got) != "keep" {
+		t.Fatalf("AppendValues on a template without a body = %q", got)
+	}
+}
+
+func TestEmptyOutputIntoANilBufferWritesNothing(t *testing.T) {
+	e := newTestEngine(t)
+	tpl := mustCompile(t, e, "{{a}}{{b}}")
+	values := []string{"", ""}
+	stream := unsafe.Pointer(unsafe.SliceData(values))
+	for _, kernel := range linearKernels {
+		if end := kernel.render(tpl, nil, 0, 0, stream, stringHeaderSize); end != 0 {
+			t.Fatalf("%s: end %d want 0", kernel.name, end)
+		}
+	}
+	for _, kernel := range fittingKernels {
+		if end := kernel.render(tpl, nil, stream, stringHeaderSize); end != 0 {
+			t.Fatalf("fitting %s: end %d want 0", kernel.name, end)
+		}
+	}
+	if got := AppendValues(nil, tpl, values); len(got) != 0 {
+		t.Fatalf("AppendValues = %q", got)
+	}
+	if got := AppendPairs(nil, tpl, []string{"a", "", "b", ""}); len(got) != 0 {
+		t.Fatalf("AppendPairs = %q", got)
+	}
+	if got := ReplaceValues(tpl, values); got != "" {
+		t.Fatalf("ReplaceValues = %q", got)
+	}
 }
 
 type renderCase struct {
@@ -167,19 +382,27 @@ func TestEveryRenderPathMatchesTheReferenceRenderer(t *testing.T) {
 				partialValues[c.keys[index]] = c.values[c.keys[index]]
 			}
 			withExtra := append(c.pairs(inOrder), "unused-key", "unused-value")
+			ordered := make([]string, len(c.keys))
+			for i, key := range c.keys {
+				ordered[i] = c.values[key]
+			}
 			inputs := []struct {
-				name   string
-				pairs  []string
-				values map[string]string
+				name    string
+				pairs   []string
+				ordered []string
+				values  map[string]string
 			}{
-				{"in-order", c.pairs(inOrder), c.values},
-				{"reversed", c.pairs(reversed), c.values},
-				{"partial", c.pairs(partial), partialValues},
-				{"extra", withExtra, c.values},
-				{"none", nil, nil},
+				{"in-order", c.pairs(inOrder), ordered, c.values},
+				{"reversed", c.pairs(reversed), ordered, c.values},
+				{"partial", c.pairs(partial), ordered[:len(partial)], partialValues},
+				{"extra", withExtra, append(ordered[:len(ordered):len(ordered)], "unused-value"), c.values},
+				{"none", nil, nil, nil},
 			}
 			for _, engine := range []*Engine{cached, uncached} {
 				tpl := mustCompile(t, engine, c.source)
+				if got := tpl.Keys(); strings.Join(got, itemSeparator) != strings.Join(c.keys, itemSeparator) {
+					t.Fatalf("round %d: Keys() = %q want %q", round, got, c.keys)
+				}
 				for _, input := range inputs {
 					want := expectedRender(c.source, input.values)
 					for call := 0; call < 2; call++ {
@@ -189,6 +412,12 @@ func TestEveryRenderPathMatchesTheReferenceRenderer(t *testing.T) {
 						if got := ReplaceMap(tpl, input.values); got != want {
 							t.Fatalf("round %d %s call %d: ReplaceMap differs (len %d want %d)", round, input.name, call, len(got), len(want))
 						}
+						if got := ReplaceValues(tpl, input.ordered); got != want {
+							t.Fatalf("round %d %s call %d: ReplaceValues differs (len %d want %d)", round, input.name, call, len(got), len(want))
+						}
+					}
+					if got := AppendValues([]byte("values|"), tpl, input.ordered); string(got) != "values|"+want {
+						t.Fatalf("round %d %s: AppendValues differs", round, input.name)
 					}
 					prefix := []byte("prefix|")
 					if got := AppendPairs(prefix, tpl, input.pairs); string(got) != "prefix|"+want {
@@ -342,18 +571,35 @@ func occupiedCacheSlots(tpl *Template) int {
 	return occupied
 }
 
+func TestPagesRenderedOnceAreNotKeptInTheCache(t *testing.T) {
+	const renders = 30000
+	e := newTestEngine(t)
+	tpl := mustCompile(t, e, buildSource(1, 2048, "k"))
+	for i := 0; i < renders; i++ {
+		value := strconv.Itoa(i)
+		if got := Replace(tpl, []string{"k0", value}); !strings.Contains(got, value) {
+			t.Fatalf("render %d lost its value", i)
+		}
+	}
+	if occupied := occupiedCacheSlots(tpl); occupied != 0 {
+		t.Fatalf("%d pages that were only rendered once are held in the cache", occupied)
+	}
+}
+
 func TestRenderCacheMemoryIsBounded(t *testing.T) {
 	const (
-		renders    = 30000
+		valueSets  = 8 * renderCacheSlots
 		literalLen = 2048
 		heapSlack  = 64 << 20
 	)
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, buildSource(1, literalLen, "k"))
-	for i := 0; i < renders; i++ {
-		value := strconv.Itoa(i)
-		if got := Replace(tpl, []string{"k0", value}); !strings.Contains(got, value) {
-			t.Fatalf("render %d lost its value", i)
+	for i := 0; i < valueSets; i++ {
+		pairs := []string{"k0", strconv.Itoa(i)}
+		for repeat := 0; repeat < 3; repeat++ {
+			if got := Replace(tpl, pairs); !strings.Contains(got, pairs[1]) {
+				t.Fatalf("render %d lost its value", i)
+			}
 		}
 	}
 	if occupied := occupiedCacheSlots(tpl); occupied == 0 || occupied > renderCacheSlots {
@@ -363,25 +609,32 @@ func TestRenderCacheMemoryIsBounded(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&stats)
 	if limit := uint64(renderCacheSlots*4*literalLen + heapSlack); stats.HeapAlloc > limit {
-		t.Fatalf("heap holds %d MB after %d distinct renders", stats.HeapAlloc>>20, renders)
+		t.Fatalf("heap holds %d MB after %d repeated value sets", stats.HeapAlloc>>20, valueSets)
 	}
 	runtime.KeepAlive(tpl)
 }
 
-func TestRenderCacheServesHitsUntilTheTTLThenRendersAgain(t *testing.T) {
+func TestRenderCacheStoresOnTheSecondRenderAndServesHitsUntilTheTTL(t *testing.T) {
 	const ttl = 30 * time.Millisecond
 	e := newTestEngine(t, WithRenderCache(ttl))
 	tpl := mustCompile(t, e, "<b>{{name}}</b>")
 	pairs := []string{"name", "alos"}
 	first := Replace(tpl, pairs)
-	if second := Replace(tpl, pairs); unsafe.StringData(first) != unsafe.StringData(second) {
-		t.Fatal("second render inside the TTL was not a cache hit")
+	stored := Replace(tpl, pairs)
+	if unsafe.StringData(first) == unsafe.StringData(stored) {
+		t.Fatal("a page was cached on its first render")
+	}
+	if hit := Replace(tpl, pairs); unsafe.StringData(hit) != unsafe.StringData(stored) {
+		t.Fatal("third render inside the TTL was not a cache hit")
 	}
 	deadline := turbo.Now() + int64(2*time.Second)
 	for turbo.Now() < deadline {
-		if later := Replace(tpl, pairs); unsafe.StringData(later) != unsafe.StringData(first) {
+		if later := Replace(tpl, pairs); unsafe.StringData(later) != unsafe.StringData(stored) {
 			if later != first {
 				t.Fatalf("re-render after expiry = %q", later)
+			}
+			if again := Replace(tpl, pairs); unsafe.StringData(again) != unsafe.StringData(later) {
+				t.Fatal("the render after expiry was not cached straight away")
 			}
 			return
 		}
@@ -393,12 +646,17 @@ func TestRenderCacheServesHitsUntilTheTTLThenRendersAgain(t *testing.T) {
 func TestClearRenderCacheDropsEveryEntry(t *testing.T) {
 	e := newTestEngine(t)
 	tpl := mustCompile(t, e, "<b>{{name}}</b>")
-	first := Replace(tpl, []string{"name", "alos"})
+	pairs := []string{"name", "alos"}
+	Replace(tpl, pairs)
+	stored := Replace(tpl, pairs)
+	if occupied := occupiedCacheSlots(tpl); occupied != 1 {
+		t.Fatalf("expected one cached page before clearing, found %d", occupied)
+	}
 	tpl.ClearRenderCache()
 	if occupied := occupiedCacheSlots(tpl); occupied != 0 {
 		t.Fatalf("%d entries survived ClearRenderCache", occupied)
 	}
-	if again := Replace(tpl, []string{"name", "alos"}); again != first || unsafe.StringData(again) == unsafe.StringData(first) {
+	if again := Replace(tpl, pairs); again != stored || unsafe.StringData(again) == unsafe.StringData(stored) {
 		t.Fatal("render after ClearRenderCache was served from the cache")
 	}
 }
@@ -449,15 +707,120 @@ func TestHotRenderPathsDoNotAllocate(t *testing.T) {
 	Replace(tpl, pairs)
 	ReplaceMap(tpl, values)
 	buf := AppendPairs(nil, tpl, pairs)
+	ordered := make([]string, 0, len(pairs)/2)
+	for i := 1; i < len(pairs); i += 2 {
+		ordered = append(ordered, pairs[i])
+	}
+	ReplaceValues(tpl, ordered)
 	checks := map[string]func(){
-		"cached Replace":    func() { sinkString = Replace(tpl, pairs) },
-		"cached ReplaceMap": func() { sinkString = ReplaceMap(tpl, values) },
-		"AppendPairs":       func() { buf = AppendPairs(buf[:0], tpl, pairs) },
-		"AppendMap":         func() { buf = AppendMap(buf[:0], tpl, values) },
+		"cached Replace":       func() { sinkString = Replace(tpl, pairs) },
+		"cached ReplaceMap":    func() { sinkString = ReplaceMap(tpl, values) },
+		"cached ReplaceValues": func() { sinkString = ReplaceValues(tpl, ordered) },
+		"AppendPairs":          func() { buf = AppendPairs(buf[:0], tpl, pairs) },
+		"AppendMap":            func() { buf = AppendMap(buf[:0], tpl, values) },
+		"AppendValues":         func() { buf = AppendValues(buf[:0], tpl, ordered) },
 	}
 	for name, run := range checks {
 		if allocs := testing.AllocsPerRun(200, run); allocs != 0 {
 			t.Fatalf("%s allocates %.1f times per call", name, allocs)
 		}
+	}
+}
+
+type appendForm struct {
+	name   string
+	render func(dst []byte, tpl *Template, c renderCase, ordered []string) []byte
+}
+
+func keyOrder(c renderCase, reversed bool) []int {
+	order := make([]int, len(c.keys))
+	for i := range order {
+		order[i] = i
+		if reversed {
+			order[i] = len(order) - 1 - i
+		}
+	}
+	return order
+}
+
+var appendForms = []appendForm{
+	{"values", func(dst []byte, tpl *Template, _ renderCase, ordered []string) []byte {
+		return AppendValues(dst, tpl, ordered)
+	}},
+	{"pairs in key order", func(dst []byte, tpl *Template, c renderCase, _ []string) []byte {
+		return AppendPairs(dst, tpl, c.pairs(keyOrder(c, false)))
+	}},
+	{"pairs reversed", func(dst []byte, tpl *Template, c renderCase, _ []string) []byte {
+		return AppendPairs(dst, tpl, c.pairs(keyOrder(c, true)))
+	}},
+	{"map", func(dst []byte, tpl *Template, c renderCase, _ []string) []byte {
+		return AppendMap(dst, tpl, c.values)
+	}},
+}
+
+func TestAppendNeverTouchesBytesBeyondItsResult(t *testing.T) {
+	forEachGatherMode(t, func(t *testing.T) {
+		e := newTestEngine(t)
+		for round := 0; round < 200; round++ {
+			c := buildRenderCase(round)
+			tpl := mustCompile(t, e, c.source)
+			want := expectedRender(c.source, c.values)
+			ordered := make([]string, len(c.keys))
+			for i, key := range c.keys {
+				ordered[i] = c.values[key]
+			}
+			for _, spare := range []int{0, 1, 15, 16, 31, 32, 100} {
+				for _, shortBy := range []int{0, 1} {
+					room := len(want) + spare - shortBy
+					if room < 0 {
+						continue
+					}
+					for _, form := range appendForms {
+						whole, body := guardedBuffer(3 + room)
+						dst := body[:3:len(body)]
+						copy(dst, "abc")
+						got := form.render(dst, tpl, c, ordered)
+						if string(got) != "abc"+want {
+							t.Fatalf("round %d spare %d short %d %s: output differs", round, spare, shortBy, form.name)
+						}
+						fits := len(want) <= room
+						if fits != (unsafe.SliceData(got) == unsafe.SliceData(dst)) {
+							t.Fatalf("round %d spare %d short %d %s: fits=%v but buffer reuse disagrees", round, spare, shortBy, form.name, fits)
+						}
+						untouchedFrom := 3
+						if fits {
+							untouchedFrom = 3 + len(want)
+						}
+						for i, b := range body[untouchedFrom:] {
+							if b != canaryByte {
+								t.Fatalf("round %d spare %d short %d %s: byte %d past the result was overwritten", round, spare, shortBy, form.name, untouchedFrom+i)
+							}
+						}
+						assertCanariesIntact(t, whole, 3+room)
+						if !fits {
+							for i, b := range got[len(got):cap(got)] {
+								if b != 0 {
+									t.Fatalf("round %d spare %d %s: spare byte %d of a grown buffer is not zero", round, spare, form.name, i)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	})
+}
+
+func TestRenderRecoversWhenValuesChangeAfterSizing(t *testing.T) {
+	const source = "<a>{{x}}</a><b>{{y}}</b>"
+	e := newTestEngine(t)
+	tpl := mustCompile(t, e, source)
+	values := []string{"first", strings.Repeat("y", 300)}
+	want := expectedRender(source, map[string]string{"x": values[0], "y": values[1]})
+	dst := make([]byte, 4, 1024)
+	copy(dst, "head")
+	got := tpl.appendSnapshot(dst, unsafe.Pointer(unsafe.SliceData(values)), stringHeaderSize)
+	if string(got) != "head"+want {
+		t.Fatalf("snapshot render = %q", got)
 	}
 }

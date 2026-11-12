@@ -13,6 +13,10 @@ func gatherAsm(dst unsafe.Pointer, segs unsafe.Pointer, n int) {
 	gatherGo(dst, segs, n)
 }
 
-func gatherStreamsAsm(dst unsafe.Pointer, room uintptr, first unsafe.Pointer, firstStride uintptr, second unsafe.Pointer, secondStride uintptr, n int) uintptr {
-	return gatherStreamsGo(dst, room, first, firstStride, second, secondStride, n)
+func (tpl *Template) renderLinear(base unsafe.Pointer, pos uintptr, end uintptr, values unsafe.Pointer, stride uintptr) uintptr {
+	return tpl.writeLinear(base, pos, end, values, stride)
+}
+
+func (tpl *Template) renderFitting(dst []byte, values unsafe.Pointer, stride uintptr) uintptr {
+	return tpl.writeFitting(dst, values, stride)
 }

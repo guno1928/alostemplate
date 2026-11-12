@@ -491,19 +491,6 @@ func BenchmarkFn_resolvePairs(b *testing.B) {
 	sinkStrings = resolved
 }
 
-func BenchmarkFn_resolveMapValues(b *testing.B) {
-	_, tpl, _, values := bmEngineTemplate(b)
-	resolved := make([]string, len(tpl.keys))
-	found := make([]bool, len(tpl.keys))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		clear(found)
-		resolveMapValues(tpl.keys, values, resolved, found)
-	}
-	sinkStrings = resolved
-}
-
 func BenchmarkFn_emitParts(b *testing.B) {
 	_, tpl, pairs, _ := bmEngineTemplate(b)
 	resolved := make([]string, len(tpl.keys))

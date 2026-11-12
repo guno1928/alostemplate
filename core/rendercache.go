@@ -16,15 +16,21 @@ type renderCacheEntry struct {
 }
 
 type renderCache struct {
-	slots [renderCacheSlots]atomic.Pointer[renderCacheEntry]
+	slots    [renderCacheSlots]atomic.Pointer[renderCacheEntry]
+	seenOnce [renderCacheSlots]atomic.Uint64
+}
+
+func (c *renderCache) seenBefore(key uint64) bool {
+	seen := &c.seenOnce[key&(renderCacheSlots-1)]
+	if seen.Load() == key {
+		return true
+	}
+	seen.Store(key)
+	return false
 }
 
 func renderCacheBucket(key uint64) uint64 {
 	return (key >> renderCacheShift) * renderCacheWays
-}
-
-func (e *renderCacheEntry) serves(key uint64, now int64) bool {
-	return e != nil && e.key == key && now < e.expires
 }
 
 func (e *renderCacheEntry) replaceableBy(key uint64, now int64) bool {
@@ -33,16 +39,20 @@ func (e *renderCacheEntry) replaceableBy(key uint64, now int64) bool {
 
 func (c *renderCache) load(key uint64, now int64) (string, bool) {
 	bucket := renderCacheBucket(key)
-	if e := c.slots[bucket].Load(); e.serves(key, now) {
-		return e.out, true
+	e := c.slots[bucket].Load()
+	if e == nil || e.key != key || now >= e.expires {
+		e = c.slots[bucket+1].Load()
+		if e == nil || e.key != key || now >= e.expires {
+			return "", false
+		}
 	}
-	if e := c.slots[bucket+1].Load(); e.serves(key, now) {
-		return e.out, true
-	}
-	return "", false
+	return e.out, true
 }
 
 func (c *renderCache) store(key uint64, out string, now int64, expires int64) {
+	if !c.seenBefore(key) {
+		return
+	}
 	entry := &renderCacheEntry{key: key, expires: expires, out: out}
 	bucket := renderCacheBucket(key)
 	first := c.slots[bucket].Load()

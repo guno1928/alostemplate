@@ -76,9 +76,12 @@ func TestPublicRenderCallsDoNotAllocate(t *testing.T) {
 	tpl := loadAppendTemplate(t, "<h1>{{title}}</h1><p>{{body}}</p>")
 	pairs := []string{"title", "Hello", "body", "World"}
 	values := map[string]string{"title": "Hello", "body": "World"}
+	ordered := []string{"Hello", "World"}
 	var rendered string
 	var buf []byte
 	checks := map[string]func(){
+		"ReplaceValues":       func() { rendered = ReplaceValues(tpl, ordered) },
+		"AppendValues":        func() { buf = AppendValues(buf[:0], tpl, ordered) },
 		"Replace pairs":       func() { rendered, _ = Replace(tpl, pairs) },
 		"Replace map":         func() { rendered, _ = Replace(tpl, values) },
 		"AppendReplace pairs": func() { buf, _ = AppendReplace(buf[:0], tpl, pairs) },
@@ -92,5 +95,39 @@ func TestPublicRenderCallsDoNotAllocate(t *testing.T) {
 	}
 	if rendered != "<h1>Hello</h1><p>World</p>" || string(buf) != rendered {
 		t.Fatalf("rendered %q, appended %q", rendered, buf)
+	}
+}
+
+func TestValuesFillPlaceholdersInKeyOrder(t *testing.T) {
+	tpl := loadAppendTemplate(t, "<h1>{{title}}</h1><p>{{body}}</p><i>{{title}}</i>")
+	if keys := tpl.Keys(); len(keys) != 2 || keys[0] != "title" || keys[1] != "body" {
+		t.Fatalf("Keys() = %q", keys)
+	}
+	cases := []struct {
+		values []string
+		want   string
+	}{
+		{[]string{"T", "B"}, "<h1>T</h1><p>B</p><i>T</i>"},
+		{[]string{"T"}, "<h1>T</h1><p>{{body}}</p><i>T</i>"},
+		{nil, "<h1>{{title}}</h1><p>{{body}}</p><i>{{title}}</i>"},
+		{[]string{"T", "B", "ignored"}, "<h1>T</h1><p>B</p><i>T</i>"},
+		{[]string{"", ""}, "<h1></h1><p></p><i></i>"},
+	}
+	for _, c := range cases {
+		for call := 0; call < 3; call++ {
+			if got := ReplaceValues(tpl, c.values); got != c.want {
+				t.Fatalf("ReplaceValues(%q) call %d = %q; want %q", c.values, call, got, c.want)
+			}
+		}
+		if got := AppendValues([]byte(">"), tpl, c.values); string(got) != ">"+c.want {
+			t.Fatalf("AppendValues(%q) = %q", c.values, got)
+		}
+	}
+	pairsOut, _ := Replace(tpl, []string{"title", "T", "body", "B"})
+	if valuesOut := ReplaceValues(tpl, []string{"T", "B"}); pairsOut != valuesOut {
+		t.Fatalf("pairs %q and values %q disagree", pairsOut, valuesOut)
+	}
+	if ReplaceValues(nil, []string{"x"}) != "" || string(AppendValues([]byte("keep"), nil, []string{"x"})) != "keep" {
+		t.Fatal("a nil template should render nothing")
 	}
 }

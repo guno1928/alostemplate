@@ -8,10 +8,11 @@ binary="$(mktemp -d)/compare.test.exe"
 go test -c -o "$binary" .
 scenarios="Tiny Small Medium Large Huge LongValues ManySlots"
 for mode in $modes; do
-	engines="alos_pairs alos_map quicktemplate fasttemplate text_template"
+	engines="alos_values alos_pairs alos_map quicktemplate fasttemplate text_template"
 	if [ "$mode" != "Buffer" ]; then
-		engines="alos_pairs_cached alos_map_cached $engines"
+		engines="alos_values_cached alos_pairs_cached alos_map_cached $engines"
 	fi
+	engines="${ENGINES:-$engines}"
 	for scenario in $scenarios; do
 		for engine in $engines; do
 			"$binary" -test.run '^$' -test.bench "^Benchmark${mode}\$/^${scenario}\$/^${engine}\$" -test.benchtime="$benchtime" -test.count="$count" | awk -v label="$mode/$scenario/$engine" '

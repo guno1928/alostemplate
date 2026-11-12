@@ -76,6 +76,8 @@ type stringRenderer struct {
 }
 
 var stringRenderers = []stringRenderer{
+	{"alos_values", func(e *engines) string { return alos.ReplaceValues(e.alosUncached, e.values) }},
+	{"alos_values_cached", func(e *engines) string { return alos.ReplaceValues(e.alosCached, e.values) }},
 	{"alos_pairs", func(e *engines) string { out, _ := alos.Replace(e.alosUncached, e.pairs); return out }},
 	{"alos_map", func(e *engines) string { out, _ := alos.Replace(e.alosUncached, e.stringMap); return out }},
 	{"alos_pairs_cached", func(e *engines) string { out, _ := alos.Replace(e.alosCached, e.pairs); return out }},
@@ -102,6 +104,9 @@ func TestAllEnginesProduceIdenticalOutput(t *testing.T) {
 		buf.Reset()
 		if _, err := e.fast.Execute(&buf, e.anyMap); err != nil || buf.String() != want {
 			t.Fatalf("%s/fasttemplate writer output differs: %v", s.Name, err)
+		}
+		if got := alos.AppendValues([]byte("prefix:"), e.alosUncached, e.values); string(got) != "prefix:"+want {
+			t.Fatalf("%s/alos AppendValues output differs", s.Name)
 		}
 		for _, values := range []any{e.pairs, e.stringMap} {
 			appended, err := alos.AppendReplace([]byte("prefix:"), e.alosUncached, values)
@@ -158,6 +163,9 @@ type bufferRenderer struct {
 }
 
 var bufferRenderers = []bufferRenderer{
+	{"alos_values", func(e *engines, _ *bytes.Buffer, raw []byte) []byte {
+		return alos.AppendValues(raw[:0], e.alosUncached, e.values)
+	}},
 	{"alos_pairs", func(e *engines, _ *bytes.Buffer, raw []byte) []byte {
 		raw, _ = alos.AppendReplace(raw[:0], e.alosUncached, e.pairs)
 		return raw

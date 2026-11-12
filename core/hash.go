@@ -8,17 +8,19 @@ import (
 )
 
 const (
-	inlineHashLimit     = 32
-	lengthSecretEntries = 64
+	inlineHashLimit     = 64
+	hashBlock           = 16
+	lengthSecretEntries = 128
 	pointerIs64Bit      = unsafe.Sizeof(uintptr(0)) == 8
 )
 
 var (
-	hashSecretA   = randomSecret()
-	hashSecretB   = randomSecret()
-	pairsHashSeed = randomSecret()
-	mapHashSeed   = randomSecret()
-	lengthSecrets = randomLengthSecrets()
+	hashSecretA    = randomSecret()
+	hashSecretB    = randomSecret()
+	pairsHashSeed  = randomSecret()
+	valuesHashSeed = randomSecret()
+	mapHashSeed    = randomSecret()
+	lengthSecrets  = randomLengthSecrets()
 )
 
 func randomSecret() uint64 {
@@ -62,21 +64,29 @@ func hashStrings(seed uint64, items []string) uint64 {
 		n := len(s)
 		p := unsafe.Pointer(unsafe.StringData(s))
 		var a, b uint64
-		switch {
-		case n > inlineHashLimit:
-			h = hashLongBytes(p, h, n)
-			continue
-		case n > 16:
+		if n <= hashBlock {
+			if n >= 8 {
+				a = loadLE64(p)
+				b = loadLE64(unsafe.Add(p, n-8))
+			} else if n >= 4 {
+				a = loadLE32(p)
+				b = loadLE32(unsafe.Add(p, n-4))
+			} else if n > 0 {
+				a = uint64(*(*byte)(p))<<16 | uint64(*(*byte)(unsafe.Add(p, n>>1)))<<8 | uint64(*(*byte)(unsafe.Add(p, n-1)))
+			}
+		} else if n <= 2*hashBlock {
 			a = loadLE64(unsafe.Add(p, n-16)) ^ foldMultiply(loadLE64(p)^hashSecretA, loadLE64(unsafe.Add(p, 8))^hashSecretB)
 			b = loadLE64(unsafe.Add(p, n-8))
-		case n >= 8:
-			a = loadLE64(p)
+		} else if n <= inlineHashLimit {
+			blocks := foldMultiply(loadLE64(p)^hashSecretA, loadLE64(unsafe.Add(p, 8))^hashSecretB)
+			for offset := hashBlock; offset < n-hashBlock; offset += hashBlock {
+				blocks = foldMultiply(loadLE64(unsafe.Add(p, offset))^hashSecretA, loadLE64(unsafe.Add(p, offset+8))^blocks^hashSecretB)
+			}
+			a = loadLE64(unsafe.Add(p, n-16)) ^ blocks
 			b = loadLE64(unsafe.Add(p, n-8))
-		case n >= 4:
-			a = loadLE32(p)
-			b = loadLE32(unsafe.Add(p, n-4))
-		case n > 0:
-			a = uint64(*(*byte)(p))<<16 | uint64(*(*byte)(unsafe.Add(p, n>>1)))<<8 | uint64(*(*byte)(unsafe.Add(p, n-1)))
+		} else {
+			a = hashLongBytes(p, hashSecretB, n)
+			b = uint64(n)
 		}
 		h = foldMultiply(a^hashSecretA, b^h^lengthSecrets[n&(lengthSecretEntries-1)])
 	}

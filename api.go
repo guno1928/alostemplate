@@ -189,6 +189,14 @@ func AppendReplace(dst []byte, tpl *Template, values any) ([]byte, error) {
 	}
 }
 
+func ReplaceValues(tpl *Template, values []string) string {
+	return corepkg.ReplaceValues(tpl, values)
+}
+
+func AppendValues(dst []byte, tpl *Template, values []string) []byte {
+	return corepkg.AppendValues(dst, tpl, values)
+}
+
 var (
 	errNilTemplate = errors.New("template is nil")
 	errOddPairs    = errors.New("replacement pairs must have an even number of items or a single value shorthand")

@@ -11,7 +11,7 @@ require (
 )
 
 require (
-	github.com/guno1928/alosmap v0.0.0-20260728040739-7f0633a4b947 // indirect
+	github.com/guno1928/alosmap v0.0.0-20261111233517-e4a9c26e491a // indirect
 	github.com/guno1928/turbo v0.0.0-20260706091412-3b318c1e1ce7 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
