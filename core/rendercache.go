@@ -1,13 +1,25 @@
 package core
 
-import "sync/atomic"
+import (
+	"math"
+	"sync/atomic"
+	"time"
+)
 
 const (
 	renderCacheWays    = 2
 	renderCacheBuckets = 256
 	renderCacheSlots   = renderCacheBuckets * renderCacheWays
 	renderCacheShift   = 64 - 8
+	neverExpires       = math.MaxInt64
 )
+
+func expiryAfter(now int64, ttl time.Duration) int64 {
+	if int64(ttl) > neverExpires-now {
+		return neverExpires
+	}
+	return now + int64(ttl)
+}
 
 type renderCacheEntry struct {
 	key     uint64

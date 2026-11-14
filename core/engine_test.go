@@ -299,8 +299,8 @@ func TestEngineLoadRecompilesWhenSignatureChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load again: %v", err)
 	}
-	if first == second {
-		t.Fatal("expected recompile after change")
+	if first != second {
+		t.Fatal("expected the changed file to update the existing handle")
 	}
 	if got := Replace(second, []string{"a", "1"}); got != "changed 1" {
 		t.Fatalf("render = %q", got)
@@ -838,12 +838,13 @@ func TestLoadFileForceBypassesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
+	before := first.live()
 	forced, err := e.loadFile(path, info, true)
 	if err != nil {
 		t.Fatalf("loadFile forced: %v", err)
 	}
-	if forced == first {
-		t.Fatal("force should recompile")
+	if forced != first || first.live() == before {
+		t.Fatal("force should recompile into the existing handle")
 	}
 }
 
@@ -855,12 +856,13 @@ func TestLoadDirectoryForceBypassesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	before := first.live()
 	forced, err := e.loadDirectory(dir, true)
 	if err != nil {
 		t.Fatalf("loadDirectory forced: %v", err)
 	}
-	if forced == first {
-		t.Fatal("force should rebuild bundle")
+	if forced != first || first.live() == before {
+		t.Fatal("force should rebuild the bundle into the existing handle")
 	}
 }
 

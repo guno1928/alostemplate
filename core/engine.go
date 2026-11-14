@@ -31,6 +31,7 @@ import (
 // when the Engine is no longer needed so any background refresh goroutine and
 // cache resources can be released.
 type Engine struct {
+	delimMu        sync.RWMutex
 	leftDelim      string
 	rightDelim     string
 	fileCache      *alosmap.TypedMap[string, *parsedFileCacheEntry]
@@ -157,6 +158,8 @@ func (e *Engine) Stop() {
 // These values are used only when parsing templates during Load. Already-loaded
 // templates keep the delimiters they were compiled with.
 func (e *Engine) Delimiters() (string, string) {
+	e.delimMu.RLock()
+	defer e.delimMu.RUnlock()
 	return e.leftDelim, e.rightDelim
 }
 
@@ -167,6 +170,8 @@ func (e *Engine) Delimiters() (string, string) {
 // method does not recompile templates that were already loaded; load or reload
 // them again if you want the new delimiters to take effect.
 func (e *Engine) SetDelimiters(left, right string) {
+	e.delimMu.Lock()
+	defer e.delimMu.Unlock()
 	if left != "" {
 		e.leftDelim = left
 	}
@@ -645,13 +650,11 @@ func (tpl *Template) renderBody() *Template {
 func (e *Engine) loadFile(abs string, info os.FileInfo, force bool) (*Template, error) {
 	signature := fileSignature(info)
 	if !force {
-		if entry, ok := e.fileCache.Load(abs); ok {
-			if entry != nil && entry.signature == signature {
-				return entry.tpl, nil
-			}
+		cached, locked := e.cachedTemplateOrLoadLock(abs, signature)
+		if !locked {
+			return cached, nil
 		}
-	} else {
-		e.fileCache.Delete(abs)
+		defer e.reloadMu.Unlock()
 	}
 	raw, err := os.ReadFile(abs)
 	if err != nil {
@@ -662,8 +665,36 @@ func (e *Engine) loadFile(abs string, info os.FileInfo, force bool) (*Template, 
 		return nil, err
 	}
 	tpl.loadPath = abs
-	e.fileCache.Store(abs, &parsedFileCacheEntry{signature: signature, tpl: tpl})
-	return tpl, nil
+	return e.publishLoaded(abs, signature, tpl), nil
+}
+
+func (e *Engine) cachedTemplate(abs string, signature cacheSignature) *Template {
+	if entry, ok := e.fileCache.Load(abs); ok && entry != nil && entry.signature == signature {
+		return entry.tpl
+	}
+	return nil
+}
+
+func (e *Engine) cachedTemplateOrLoadLock(abs string, signature cacheSignature) (*Template, bool) {
+	if cached := e.cachedTemplate(abs, signature); cached != nil {
+		return cached, false
+	}
+	e.reloadMu.Lock()
+	if cached := e.cachedTemplate(abs, signature); cached != nil {
+		e.reloadMu.Unlock()
+		return cached, false
+	}
+	return nil, true
+}
+
+func (e *Engine) publishLoaded(abs string, signature cacheSignature, fresh *Template) *Template {
+	handle := fresh
+	if entry, ok := e.fileCache.Load(abs); ok && entry != nil && entry.tpl != nil {
+		handle = entry.tpl
+		applyTemplateReload(handle, fresh)
+	}
+	e.fileCache.Store(abs, &parsedFileCacheEntry{signature: signature, tpl: handle})
+	return handle
 }
 
 func (e *Engine) loadDirectory(abs string, force bool) (*Template, error) {
@@ -672,13 +703,11 @@ func (e *Engine) loadDirectory(abs string, force bool) (*Template, error) {
 		return nil, err
 	}
 	if !force {
-		if entry, ok := e.fileCache.Load(abs); ok {
-			if entry != nil && entry.signature == signature {
-				return entry.tpl, nil
-			}
+		cached, locked := e.cachedTemplateOrLoadLock(abs, signature)
+		if !locked {
+			return cached, nil
 		}
-	} else {
-		e.fileCache.Delete(abs)
+		defer e.reloadMu.Unlock()
 	}
 	byCanonical := make(map[string]*bundleSourceFile, len(files))
 	baseCounts := make(map[string]int, len(files))
@@ -734,8 +763,7 @@ func (e *Engine) loadDirectory(abs string, force bool) (*Template, error) {
 		bundle.defaultTpl = compiled[normalizeTemplateName(bundle.names[0])]
 	}
 	bundle.reloadName = ""
-	e.fileCache.Store(abs, &parsedFileCacheEntry{signature: signature, tpl: bundle})
-	return bundle, nil
+	return e.publishLoaded(abs, signature, bundle), nil
 }
 
 // inlineKeyLimit and inlinePartLimit bound the stack-resident scratch used by
@@ -964,7 +992,7 @@ func (tpl *Template) storeRender(key uint64, rendered string, now int64, ttl tim
 			}
 		}
 	}
-	cache.store(key, rendered, now, now+int64(ttl))
+	cache.store(key, rendered, now, expiryAfter(now, ttl))
 }
 
 func (tpl *Template) hashMapValues(values map[string]string) uint64 {
@@ -1145,8 +1173,7 @@ func (tpl *Template) replaceSingleMap(dst []byte, values map[string]string) []by
 
 func (e *Engine) compileSource(src string) (*Template, error) {
 	src = padSource(src)
-	leftDelim := e.leftDelim
-	rightDelim := e.rightDelim
+	leftDelim, rightDelim := e.Delimiters()
 	leftLen := len(leftDelim)
 	rightLen := len(rightDelim)
 
@@ -1332,8 +1359,7 @@ func (e *Engine) expandBundleSource(file *bundleSourceFile, aliases map[string]*
 		file.expanding = false
 	}()
 
-	leftDelim := e.leftDelim
-	rightDelim := e.rightDelim
+	leftDelim, rightDelim := e.Delimiters()
 	leftLen := len(leftDelim)
 	rightLen := len(rightDelim)
 
